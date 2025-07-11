@@ -28,10 +28,6 @@ This is the frontend for the AILA STAR research project at Drexel University, Su
 
 - Hosted on Vercel (recommended) or any platform that supports Next.js.
 
-## Project Plan
-
-See `1-project_plan.docx.pdf` for research objectives, timeline, and references.
-
 ## License
 
 MIT

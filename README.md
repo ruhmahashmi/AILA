@@ -1,6 +1,7 @@
 # AILA STAR – AI-powered Intelligent Lecturing Assistant
 
 This repository contains the full code and research artifacts for the AILA STAR project (Drexel University, Summer 2025).
+AILA (AI-powered Intelligent Lecturing Assistant) is a research system that supports secure logins, lecture material upload, knowledge extraction, and AI-powered teaching assistant features for instructors and students.
 
 ## Structure
 

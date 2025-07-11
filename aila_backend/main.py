@@ -1,14 +1,14 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from dotenv import load_dotenv
 import os
 import fitz  # PyMuPDF
+from pptx import Presentation
 from supabase import create_client, Client
 from llama_index.llms.gemini import Gemini
-from pptx import Presentation
+import uuid
 
-# Load environment variables
 load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
@@ -16,15 +16,10 @@ google_api_key = os.getenv("GOOGLE_API_KEY")
 if google_api_key:
     os.environ["GOOGLE_API_KEY"] = google_api_key
 
-# Initialize LLM
-llm = Gemini(model="models/gemini-2.5-pro")
-
-class ProcessLectureRequest(BaseModel):
-    filename: str
-    course_id: str
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+llm = Gemini(model="models/gemini-2.5-flash")
 
 app = FastAPI()
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
@@ -32,8 +27,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def download_from_supabase(bucket: str, file_path: str, save_as: str):
     response = supabase.storage.from_(bucket).download(file_path)
@@ -63,43 +56,93 @@ def extract_text_from_pptx(pptx_path):
             segments.append("\n".join(slide_text))
     return segments
 
-@app.post("/process-lecture/")
-async def process_lecture(request: ProcessLectureRequest):
-    filename = request.filename
-    course_id = request.course_id
+def parse_and_store(job_id, course_id, file_name):
     bucket = "lecture-materials"
-    supabase_path = f"{course_id}/{filename}"
-    local_path = f"uploads/{course_id}_{filename}"
+    supabase_path = f"{course_id}/{file_name}"
+    local_path = f"uploads/{course_id}_{file_name}"
     os.makedirs("uploads", exist_ok=True)
     try:
         download_from_supabase(bucket, supabase_path, local_path)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
-
-    # Choose extractor based on file type
-    if filename.lower().endswith('.pdf'):
-        segments = extract_text_segments(local_path)
-    elif filename.lower().endswith('.pptx'):
-        segments = extract_text_from_pptx(local_path)
-    else:
-        raise HTTPException(status_code=400, detail="Unsupported file type")
-
-    # Summarize each segment with Gemini LLM
-    summaries = []
-    for segment in segments:
-        if segment.strip():
-            resp = llm.complete(f"Summarize this lecture segment:\n{segment}")
-            summaries.append(str(resp))
+        supabase.table('lecture_processing').update({"progress": 10}).eq('id', job_id).execute()
+        if file_name.lower().endswith('.pdf'):
+            segments = extract_text_segments(local_path)
+        elif file_name.lower().endswith('.pptx'):
+            segments = extract_text_from_pptx(local_path)
         else:
-            summaries.append("")
+            raise Exception("Unsupported file type")
+        supabase.table('lecture_processing').update({"progress": 30}).eq('id', job_id).execute()
+        summaries = []
+        total_segments = len(segments)
+        for idx, segment in enumerate(segments):
+            if segment.strip():
+                resp = llm.complete(f"Summarize this lecture segment:\n{segment}")
+                summaries.append(str(resp))
+            else:
+                summaries.append("")
+            progress = 30 + 70 * (idx + 1) / total_segments if total_segments else 100
+            supabase.table('lecture_processing').update({"progress": progress}).eq('id', job_id).execute()
+        result = {
+            "segments": segments,
+            "summaries": summaries,
+        }
+        supabase.table('lecture_processing').update({
+            "progress": 100,
+            "status": "done",
+            "result": result
+        }).eq('id', job_id).execute()
+    except Exception as e:
+        supabase.table('lecture_processing').update({
+            "status": "error",
+            "error": str(e),
+            "progress": 100
+        }).eq('id', job_id).execute()
 
+class ProcessLectureRequest(BaseModel):
+    file_name: str
+    course_id: str
+
+@app.post("/process-lecture/")
+async def process_lecture(request: ProcessLectureRequest, background_tasks: BackgroundTasks):
+    course_id = request.course_id
+    file_name = request.file_name
+    job_id = str(uuid.uuid4())
+    supabase.table('lecture_processing').insert({
+        "id": job_id,
+        "course_id": course_id,
+        "file_name": file_name,
+        "status": "pending",
+        "progress": 0
+    }).execute()
+    background_tasks.add_task(parse_and_store, job_id, course_id, file_name)
+    return {"status": "processing started", "job_id": job_id}
+
+@app.get("/lecture-status/")
+async def lecture_status(course_id: str, file_name: str):
+    job = supabase.table('lecture_processing') \
+        .select('*') \
+        .eq('course_id', course_id) \
+        .eq('file_name', file_name) \
+        .order('created_at', desc=True) \
+        .limit(1) \
+        .execute()
+    if not job.data:
+        return {"status": "not found"}
+    job = job.data[0]
     return {
-        "status": "processed",
-        "filename": filename,
-        "num_segments": len(segments),
-        "summaries": summaries,
-        "segments": segments,  # Return all segments for full UI display
+        "status": job['status'],
+        "progress": job.get('progress', 0),
+        "result": job.get('result'),
+        "error": job.get('error')
     }
+
+@app.get("/lecture-history/")
+async def lecture_history(course_id: str):
+    jobs = supabase.table('lecture_processing') \
+        .select('*') \
+        .eq('course_id', course_id) \
+        .order('created_at', desc=True) \
+        .execute()
+    return jobs.data if jobs.data else []
 
 @app.get("/")
 async def root():
