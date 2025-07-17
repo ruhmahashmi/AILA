@@ -1,25 +1,42 @@
 # AILA STAR – AI-powered Intelligent Lecturing Assistant
 
 This repository contains the full code and research artifacts for the AILA STAR project (Drexel University, Summer 2025).
-AILA (AI-powered Intelligent Lecturing Assistant) is a research system that supports secure logins, lecture material upload, knowledge extraction, and AI-powered teaching assistant features for instructors and students.
+AILA (AI-powered Intelligent Lecturing Assistant) is a research system that supports secure logins, lecture material upload, knowledge extraction, automated segmentation, retrieval-augmented AI teaching assistant and role-based dashboards for instructors and students.
 
-## Structure
+## Project Structure
 
-- `aila_frontend/` – Next.js + Supabase frontend (student/instructor dashboards, auth, course pages)
-- `aila_backend/` – (optional) FastAPI backend for advanced features (LLM, file processing, etc.)
-- `data/` – (optional) Training and test datasets
-- `figures/` – (optional) Project figures and diagrams
-- `references/` – (optional) Related work and papers
-- `writing_ups/` – (optional) Posters and research papers
-- `1-project_plan.docx.pdf` – Project plan
+- `aila_backend/`: FastAPI + SQLite backend
+- `aila_frontend/`: Next.js/React frontend
 
-## Quick Start
+## Key Features
 
+- Secure login/signup (with role checks)
+- Course, week, and lecture organization and upload
+- Slide/segment extraction, LLM-powered summaries/MCQ generation
+- Spaced retrieval practice via interactive dashboards
+- Modular, research-oriented codebase for rapid iteration
+
+## Getting Started
+
+### Backend
+See `aila_backend/README.md` for frontend setup instructions.
+
+1. `cd aila_backend`
+2. `pip install -r requirements.txt`
+3. `uvicorn main:app --reload`
+
+### Frontend
 See `aila_frontend/README.md` for frontend setup instructions.
 
-## Research Objectives
+1. `cd aila_frontend`
+2. `npm install`
+3. `npm run dev`
 
-See `1-project_plan.docx.pdf` for the full project plan and research goals.
+## Development Notes
+
+- All API endpoints are scoped under `/api/` for easy consumption.
+- Uses local SQLite for quick prototyping; easily upgradable to Postgres.
+- Environment variables (API keys, etc.) must be set in `.env`.
 
 ---
 

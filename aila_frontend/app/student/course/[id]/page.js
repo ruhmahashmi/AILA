@@ -1,7 +1,6 @@
 'use client';
 import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
-import { supabase } from '../../../../lib/supabaseClient';
 
 export default function StudentCoursePage() {
   const { id } = useParams();
@@ -12,17 +11,15 @@ export default function StudentCoursePage() {
   useEffect(() => {
     async function fetchCourseAndModules() {
       setLoading(true);
-      const { data: courseData } = await supabase
-        .from('courses')
-        .select('*')
-        .eq('id', id)
-        .single();
+
+      // Fetch course info from backend REST API (SQL-powered)
+      const courseRes = await fetch(`/api/course/${id}`);
+      const courseData = courseRes.ok ? await courseRes.json() : null;
       setCourse(courseData);
 
-      const { data: modulesData } = await supabase
-        .from('modules')
-        .select('*')
-        .eq('course_id', id);
+      // Fetch modules from backend REST API (SQL-powered)
+      const modulesRes = await fetch(`/api/course/${id}/modules`);
+      const modulesData = modulesRes.ok ? await modulesRes.json() : [];
       setModules(modulesData || []);
       setLoading(false);
     }
@@ -40,7 +37,7 @@ export default function StudentCoursePage() {
           <ul>
             {modules.map(m => (
               <li key={m.id} className="mb-2 p-3 bg-gray-50 rounded border">
-                <div className="font-semibold">{m.title}</div>
+                <div className="font-semibold">{m.title || m.name}</div>
                 {m.description && <div className="text-gray-500">{m.description}</div>}
               </li>
             ))}

@@ -1,7 +1,6 @@
 'use client';
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { supabase } from '../../lib/supabaseClient';
 
 export default function InstructorDashboard() {
   const [courses, setCourses] = useState([]);
@@ -11,39 +10,37 @@ export default function InstructorDashboard() {
   const [userId, setUserId] = useState(null);
   const router = useRouter();
 
+  // Role and login check - using localStorage for robust auth persistence
   useEffect(() => {
-    async function checkAuthAndRole() {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) {
-        router.replace('/login');
-        return;
-      }
+    const stored = typeof window !== 'undefined' ? localStorage.getItem('user') : null;
+    if (!stored) {
+      router.replace('/login');
+      return;
+    }
+    try {
+      const user = JSON.parse(stored);
       setUserId(user.id);
-      const { data: profile } = await supabase
-        .from('profiles')
-        .select('role')
-        .eq('id', user.id)
-        .single();
-      if (!profile || profile.role !== 'instructor') {
+      if (user.role !== 'instructor') {
         router.replace('/student');
         return;
       }
       setRoleChecked(true);
+    } catch {
+      router.replace('/login');
     }
-    checkAuthAndRole();
   }, [router]);
 
+  // Fetch courses for this instructor
   useEffect(() => {
     if (!roleChecked || !userId) return;
     fetchCourses();
+    // eslint-disable-next-line
   }, [roleChecked, userId]);
 
   async function fetchCourses() {
     setLoading(true);
-    const { data } = await supabase
-      .from('courses')
-      .select('*')
-      .eq('instructor_id', userId);
+    const res = await fetch(`http://localhost:8000/api/courses?instructor_id=${userId}`);
+    const data = await res.json();
     setCourses(data || []);
     setLoading(false);
   }
@@ -51,14 +48,16 @@ export default function InstructorDashboard() {
   async function handleCreateCourse(e) {
     e.preventDefault();
     if (!newCourse) return;
-    await supabase
-      .from('courses')
-      .insert([{ name: newCourse, instructor_id: userId }]);
+    await fetch('http://localhost:8000/api/courses', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: newCourse, instructor_id: userId })
+    });
     setNewCourse('');
     fetchCourses();
   }
 
-  if (!roleChecked) return null;
+  if (!roleChecked) return <div className="p-8">Checking authorization…</div>;
 
   return (
     <div className="max-w-3xl mx-auto p-6">
@@ -68,9 +67,12 @@ export default function InstructorDashboard() {
         <input
           className="flex-1 px-3 py-2 border border-gray-300 rounded shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
           type="text"
+          name="courseName"
+          id="courseName"
           placeholder="New course name"
           value={newCourse}
           onChange={e => setNewCourse(e.target.value)}
+          required
         />
         <button
           className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition"

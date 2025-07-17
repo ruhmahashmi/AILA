@@ -1,7 +1,6 @@
 'use client';
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { supabase } from '../../lib/supabaseClient';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -9,34 +8,29 @@ export default function LoginPage() {
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
 
-  const handleEmailLogin = async (e) => {
+  const handleLogin = async (e) => {
     e.preventDefault();
     setLoading(true);
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) {
-      alert(error.message);
-      setLoading(false);
-      return;
-    }
-    // Wait 500ms for session to be established
-    setTimeout(async () => {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (user) {
-        const { data: profile } = await supabase
-          .from('profiles')
-          .select('role')
-          .eq('id', user.id)
-          .single();
-        if (profile?.role === 'instructor') {
-          router.push('/instructor');
-        } else if (profile?.role === 'student') {
-          router.push('/student');
-        } else {
-          router.push('/');
-        }
+    try {
+      const res = await fetch('http://localhost:8000/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+      const result = await res.json();
+      if (!res.ok) {
+        alert(result.error || 'Login failed.');
+      } else {
+        // Store user info locally for dashboard pages to read
+        localStorage.setItem('user', JSON.stringify(result));
+        if (result.role === 'instructor') router.push('/instructor');
+        else if (result.role === 'student') router.push('/student');
+        else router.push('/');
       }
-      setLoading(false);
-    }, 500);
+    } catch (err) {
+      alert('A network error occurred.');
+    }
+    setLoading(false);
   };
 
   const handleSocial = (provider) => {
@@ -46,24 +40,28 @@ export default function LoginPage() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-100">
       <form
-        onSubmit={handleEmailLogin}
+        onSubmit={handleLogin}
         className="bg-white p-8 rounded-xl shadow w-full max-w-md flex flex-col"
       >
         <h2 className="text-2xl font-bold mb-6 text-center">Welcome back</h2>
         <input
           type="email"
+          name="email"
+          id="email"
           placeholder="Email address"
           className="w-full px-4 py-3 mb-4 border border-gray-200 rounded-full focus:outline-none focus:ring-2 focus:ring-black"
           value={email}
-          onChange={(e) => setEmail(e.target.value)}
+          onChange={e => setEmail(e.target.value)}
           required
         />
         <input
           type="password"
+          name="password"
+          id="password"
           placeholder="Password"
           className="w-full px-4 py-3 mb-4 border border-gray-200 rounded-full focus:outline-none focus:ring-2 focus:ring-black"
           value={password}
-          onChange={(e) => setPassword(e.target.value)}
+          onChange={e => setPassword(e.target.value)}
           required
         />
         <button
@@ -90,7 +88,7 @@ export default function LoginPage() {
           onClick={() => handleSocial('Google')}
           disabled
         >
-          <img src="/google-icon.svg" alt="Google" className="h-5 w-5 mr-3" />
+          <img src="https://upload.wikimedia.org/wikipedia/commons/5/53/Google_%22G%22_Logo.svg" alt="Google" className="h-5 w-5 mr-3" />
           Continue with Google
         </button>
         <button
@@ -99,7 +97,7 @@ export default function LoginPage() {
           onClick={() => handleSocial('Microsoft')}
           disabled
         >
-          <img src="/microsoft-icon.svg" alt="Microsoft" className="h-5 w-5 mr-3" />
+          <img src="https://upload.wikimedia.org/wikipedia/commons/4/44/Microsoft_logo.svg" alt="Microsoft" className="h-5 w-5 mr-3" />
           Continue with Microsoft Account
         </button>
         <button
@@ -108,7 +106,7 @@ export default function LoginPage() {
           onClick={() => handleSocial('Apple')}
           disabled
         >
-          <img src="/apple-icon.svg" alt="Apple" className="h-5 w-5 mr-3" />
+          <img src="https://upload.wikimedia.org/wikipedia/commons/f/fa/Apple_logo_black.svg" alt="Apple" className="h-5 w-5 mr-3" />
           Continue with Apple
         </button>
         <button

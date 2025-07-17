@@ -1,7 +1,7 @@
 'use client';
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { supabase } from '../../lib/supabaseClient';
+// import { supabase } from '../../lib/supabaseClient'; // 
 
 export default function SignUpPage() {
   const router = useRouter();
@@ -10,21 +10,22 @@ export default function SignUpPage() {
   const [role, setRole] = useState('student');
   const [loading, setLoading] = useState(false);
 
+  // SQLite/REST: use fetch to backend endpoint
   const handleSignUp = async (e) => {
     e.preventDefault();
     setLoading(true);
-    // Pass role as metadata
-    const { data, error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: {
-        data: { role }
-      }
+
+    const res = await fetch('http://localhost:8000/api/auth/signup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password, role }),
     });
-    if (error) {
-      alert(error.message);
+    const result = await res.json();
+
+    if (!res.ok) {
+      alert(result.error || 'Sign-up failed.');
     } else {
-      alert('Check your email for confirmation!');
+      alert('Sign-up succeeded! Please log in.');
       router.push('/login');
     }
     setLoading(false);
@@ -36,6 +37,8 @@ export default function SignUpPage() {
         <h2 className="text-2xl font-bold mb-6 text-center">Create your account</h2>
         <input
           type="email"
+          name="email"
+          id="email"
           placeholder="Email address"
           className="w-full px-4 py-3 mb-4 border border-gray-200 rounded-full focus:outline-none focus:ring-2 focus:ring-black"
           value={email}
@@ -44,6 +47,8 @@ export default function SignUpPage() {
         />
         <input
           type="password"
+          name="password"
+          id="password"
           placeholder="Password"
           className="w-full px-4 py-3 mb-4 border border-gray-200 rounded-full focus:outline-none focus:ring-2 focus:ring-black"
           value={password}
@@ -51,6 +56,8 @@ export default function SignUpPage() {
           required
         />
         <select
+          name="role"
+          id="role"
           className="w-full px-4 py-3 mb-4 border border-gray-200 rounded-full"
           value={role}
           onChange={e => setRole(e.target.value)}

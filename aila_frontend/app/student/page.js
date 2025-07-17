@@ -1,7 +1,6 @@
 'use client';
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { supabase } from '../../lib/supabaseClient';
 
 export default function StudentDashboard() {
   const [enrolledCourses, setEnrolledCourses] = useState([]);
@@ -13,17 +12,21 @@ export default function StudentDashboard() {
 
   useEffect(() => {
     async function checkAuthAndRole() {
-      const { data: { user } } = await supabase.auth.getUser();
+      const res = await fetch('http://localhost:8000/api/auth/user');
+      if (!res.ok) {
+        router.replace('/login');
+        return;
+      }
+      const data = await res.json();
+      const user = data.user;
       if (!user) {
         router.replace('/login');
         return;
       }
       setUserId(user.id);
-      const { data: profile } = await supabase
-        .from('profiles')
-        .select('role')
-        .eq('id', user.id)
-        .single();
+
+      const profileRes = await fetch(`http://localhost:8000/api/profiles/${user.id}`);
+      const profile = await profileRes.json();
       if (!profile || profile.role !== 'student') {
         router.replace('/instructor');
         return;
@@ -40,25 +43,28 @@ export default function StudentDashboard() {
 
   async function fetchCourses() {
     setLoading(true);
-    const { data: allCourses } = await supabase.from('courses').select('*');
-    const { data: enrollments } = await supabase
-      .from('enrollments')
-      .select('course_id')
-      .eq('student_id', userId);
+    const allCoursesRes = await fetch('http://localhost:8000/api/courses');
+    const allCourses = await allCoursesRes.json();
+
+    const enrollmentsRes = await fetch(`http://localhost:8000/api/enrollments?student_id=${userId}`);
+    const enrollments = await enrollmentsRes.json();
     const enrolledIds = enrollments ? enrollments.map(e => e.course_id) : [];
+
     setEnrolledCourses(allCourses.filter(c => enrolledIds.includes(c.id)));
     setAvailableCourses(allCourses.filter(c => !enrolledIds.includes(c.id)));
     setLoading(false);
   }
 
   async function handleEnroll(courseId) {
-    await supabase
-      .from('enrollments')
-      .insert([{ student_id: userId, course_id: courseId }]);
+    await fetch('http://localhost:8000/api/enrollments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ student_id: userId, course_id: courseId }),
+    });
     fetchCourses();
   }
 
-  if (!roleChecked) return null;
+  if (!roleChecked) return <div className="p-8">Checking authorization…</div>;
 
   return (
     <div className="max-w-2xl mx-auto py-8">
@@ -113,3 +119,4 @@ export default function StudentDashboard() {
     </div>
   );
 }
+
