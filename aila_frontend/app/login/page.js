@@ -11,27 +11,27 @@ export default function LoginPage() {
   const handleLogin = async (e) => {
     e.preventDefault();
     setLoading(true);
-    try {
-      const res = await fetch('http://localhost:8000/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
-      });
-      const result = await res.json();
-      if (!res.ok) {
-        alert(result.error || 'Login failed.');
-      } else {
-        // Store user info locally for dashboard pages to read
-        localStorage.setItem('user', JSON.stringify(result));
-        if (result.role === 'instructor') router.push('/instructor');
-        else if (result.role === 'student') router.push('/student');
-        else router.push('/');
-      }
-    } catch (err) {
-      alert('A network error occurred.');
+  
+    const formData = new FormData();
+    formData.append("email", email);
+    formData.append("password", password);
+  
+    const res = await fetch('http://localhost:8000/api/auth/login', {
+      method: 'POST',
+      body: formData,
+    });
+    const result = await res.json();
+    if (!res.ok) {
+      alert(result.error || 'Login failed.');
+    } else {
+      localStorage.setItem('user', JSON.stringify(result));
+      if (result.role === 'instructor') router.push('/instructor');
+      else if (result.role === 'student') router.push('/student');
+      else router.push('/');
     }
     setLoading(false);
   };
+  
 
   const handleSocial = (provider) => {
     alert(`Social login with ${provider} is not enabled yet.`);

@@ -8,11 +8,15 @@ export default function InstructorDashboard() {
   const [newCourse, setNewCourse] = useState('');
   const [roleChecked, setRoleChecked] = useState(false);
   const [userId, setUserId] = useState(null);
+  const [error, setError] = useState(null);
   const router = useRouter();
 
-  // Role and login check - using localStorage for robust auth persistence
+  // Role and login check
   useEffect(() => {
-    const stored = typeof window !== 'undefined' ? localStorage.getItem('user') : null;
+    let stored = null;
+    if (typeof window !== 'undefined') {
+      stored = localStorage.getItem('user');
+    }
     if (!stored) {
       router.replace('/login');
       return;
@@ -39,22 +43,56 @@ export default function InstructorDashboard() {
 
   async function fetchCourses() {
     setLoading(true);
-    const res = await fetch(`http://localhost:8000/api/courses?instructor_id=${userId}`);
-    const data = await res.json();
-    setCourses(data || []);
+    setError(null);
+    try {
+      const res = await fetch(`http://localhost:8000/api/courses?instructor_id=${userId}`);
+      // Defensive fallback for non-200 responses or invalid JSON:
+      if (!res.ok) {
+        setCourses([]);
+        const errMsg = `Server returned ${res.status}: ${(await res.text()) || res.statusText}`;
+        setError(errMsg);
+        setLoading(false);
+        return;
+      }
+      const data = await res.json();
+      if (!Array.isArray(data)) {
+        setCourses([]);
+        setError('Invalid course data: not an array');
+        setLoading(false);
+        return;
+      }
+      setCourses(data);
+      setError(null);
+    } catch (e) {
+      setCourses([]);
+      setError('Failed to fetch courses: ' + e.message);
+    }
     setLoading(false);
   }
 
   async function handleCreateCourse(e) {
     e.preventDefault();
     if (!newCourse) return;
-    await fetch('http://localhost:8000/api/courses', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: newCourse, instructor_id: userId })
-    });
-    setNewCourse('');
-    fetchCourses();
+    setError(null);
+    try {
+      const formData = new FormData();
+      formData.append("name", newCourse);
+      formData.append("instructor_id", userId);
+
+      const res = await fetch('http://localhost:8000/api/courses', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!res.ok) {
+        setError('Could not create course: ' + (await res.text()));
+      } else {
+        setNewCourse('');
+        fetchCourses();
+      }
+    } catch (e) {
+      setError('Could not create course: ' + e.message);
+    }
   }
 
   if (!roleChecked) return <div className="p-8">Checking authorization…</div>;
@@ -81,14 +119,17 @@ export default function InstructorDashboard() {
           Create Course
         </button>
       </form>
+      {error && (
+        <div className="mb-4 text-red-600">{error}</div>
+      )}
       {loading ? (
         <div className="text-gray-500">Loading courses...</div>
       ) : (
         <div className="grid gap-4">
-          {courses.length === 0 ? (
+          {Array.isArray(courses) && courses.length === 0 ? (
             <div className="text-gray-500">No courses yet.</div>
           ) : (
-            courses.map(course => (
+            (Array.isArray(courses) ? courses : []).map(course => (
               <div
                 key={course.id}
                 className="bg-white shadow rounded p-4 flex items-center justify-between"

@@ -10,18 +10,22 @@ export default function SignUpPage() {
   const [role, setRole] = useState('student');
   const [loading, setLoading] = useState(false);
 
-  // SQLite/REST: use fetch to backend endpoint
   const handleSignUp = async (e) => {
     e.preventDefault();
     setLoading(true);
-
+  
+    // Use FormData, do NOT set Content-Type manually
+    const formData = new FormData();
+    formData.append("email", email);
+    formData.append("password", password);
+    formData.append("role", role);
+  
     const res = await fetch('http://localhost:8000/api/auth/signup', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password, role }),
+      body: formData,
     });
     const result = await res.json();
-
+  
     if (!res.ok) {
       alert(result.error || 'Sign-up failed.');
     } else {
@@ -30,6 +34,7 @@ export default function SignUpPage() {
     }
     setLoading(false);
   };
+  
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-100">

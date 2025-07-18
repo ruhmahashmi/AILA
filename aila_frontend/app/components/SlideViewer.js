@@ -1,12 +1,27 @@
 // app/components/SlideViewer.js
+'use client';
 export default function SlideViewer({ segment }) {
-    if (!segment) return <div className="p-8">Select a slide to view its content.</div>;
-    return (
-      <div className="flex-1 p-6">
-        <h2 className="font-bold text-lg mb-2">{segment.title}</h2>
-        <pre className="mb-4 bg-gray-50 p-2 rounded whitespace-pre-wrap">{segment.content}</pre>
-        {/* Add Teaching Assistant button here in the future */}
+  if (!segment) return <div className="p-4">No segment selected.</div>;
+
+  return (
+    <div className="p-4 border border-gray-300 rounded shadow-sm overflow-auto h-64 bg-white">
+      <h2 className="font-semibold mb-2">{segment.title}</h2>
+      <div className="mb-2">
+        {segment.summary && (
+          <div>
+            <span className="font-medium">Summary: </span>
+            <span>{segment.summary}</span>
+          </div>
+        )}
+        {segment.keywords && segment.keywords.length > 0 && (
+          <div>
+            <span className="font-medium">Keywords: </span>
+            <span>{typeof segment.keywords === 'string' ? segment.keywords : segment.keywords.join(', ')}</span>
+          </div>
+        )}
       </div>
-    );
-  }
-  
+      <hr className="my-2" />
+      <div className="whitespace-pre-wrap">{segment.content}</div>
+    </div>
+  );
+}

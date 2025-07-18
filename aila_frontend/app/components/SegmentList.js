@@ -1,22 +1,22 @@
 // app/components/SegmentList.js
-export default function SegmentList({ segments, selectedIndex, onSelect }) {
-    return (
-      <div className="w-60 p-2 border-r">
-        <div className="font-semibold mb-2">Slides</div>
-        <ul>
-          {segments.length === 0 && <li className="text-gray-400">No segments</li>}
-          {segments.map((seg, idx) => (
-            <li key={seg.id}>
-              <button
-                className={`block w-full p-2 text-left ${idx === selectedIndex ? 'bg-blue-100 font-bold' : ''}`}
-                onClick={() => onSelect(idx)}
-              >
-                {seg.title || `Slide ${idx + 1}`}
-              </button>
-            </li>
-          ))}
-        </ul>
-      </div>
-    );
-  }
-  
+'use client';
+export default function SegmentList({ segments, activeSegmentId, onClickSegment }) {
+  return (
+    <div className="border-b border-gray-300 py-2 overflow-auto max-h-56">
+      <ul>
+        {segments.map(segment => (
+          <li key={segment.id}>
+            <button
+              className={`block w-full text-left px-2 py-1 rounded hover:bg-gray-200 ${
+                activeSegmentId === segment.id ? 'bg-blue-100 font-semibold' : ''
+              }`}
+              onClick={() => onClickSegment(segment.id)}
+            >
+              {segment.title || `Slide ${segment.segment_index + 1}`}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}

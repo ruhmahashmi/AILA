@@ -1,43 +1,71 @@
 // app/components/UploadLectureForm.js
-import { useRef } from 'react';
+'use client';
+import axios from 'axios';
+import { useState } from 'react';
 
-export default function UploadLectureForm({ courseId, week, onUpload }) {
-  const fileInputRef = useRef();
+export default function UploadLectureForm({ courseId, week, onUploadStart }) {
+  const [selectedFiles, setSelectedFiles] = useState([]);
+  const [uploadProgress, setUploadProgress] = useState({}); // { filename: percent }
 
-  async function handleUpload(e) {
+  const handleFileChange = (e) => {
+    setSelectedFiles(Array.from(e.target.files));
+  };
+
+  const handleUpload = async (e) => {
     e.preventDefault();
-    const file = fileInputRef.current.files[0];
-    if (!file) return alert("Select a file!");
+    for (const file of selectedFiles) {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('course_id', courseId);
+      formData.append('week', week);
+      // Notify parent/component above that processing should start polling for this file (if applicable)
+      onUploadStart && onUploadStart(file.name);
 
-    // Prepare form data for backend REST endpoint
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('course_id', courseId);
-    formData.append('week', week);
-    formData.append('file_name', file.name);
-
-    // Send to your backend (SQL-based FastAPI or similar)
-    const res = await fetch(`/api/course/${courseId}/week/${week}/upload`, {
-      method: 'POST',
-      body: formData,
-    });
-
-    if (!res.ok) {
-      const msg = (await res.json())?.error || "Upload failed.";
-      alert(msg);
-      return;
+      await axios.post('http://localhost:8000/api/upload-lecture/', formData, {
+        onUploadProgress: progressEvent => {
+          const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+          setUploadProgress(prev => ({ ...prev, [file.name]: percent }));
+        }
+      });
     }
-    fileInputRef.current.value = '';
-    onUpload?.();
-  }
+    setSelectedFiles([]);
+  };
 
   return (
-    <form onSubmit={handleUpload} className="flex gap-2 items-center">
-      <input type="file" ref={fileInputRef} accept=".pdf,.pptx" />
-      <button type="submit" className="bg-blue-600 text-white px-4 py-2 rounded">
+    <form onSubmit={handleUpload} className="flex items-center space-x-4 mb-4">
+      <input
+        type="file"
+        name="lectureFiles"
+        id="lectureFiles"
+        accept=".pdf,.pptx"
+        multiple
+        onChange={handleFileChange}
+        className="border rounded px-2 py-1"
+        required
+      />
+      <button
+        type="submit"
+        className="bg-blue-600 text-white px-4 py-2 rounded"
+        disabled={selectedFiles.length === 0}
+      >
         Upload
       </button>
+      {/* Show individual file upload progress bars */}
+      <div className="space-y-1">
+        {selectedFiles.map(file => (
+          uploadProgress[file.name] != null && (
+            <div key={file.name} className="w-48">
+              <span className="text-xs">{file.name}</span>
+              <div className="bg-gray-200 h-2 rounded">
+                <div
+                  className="bg-green-500 h-2 rounded"
+                  style={{ width: `${uploadProgress[file.name]}%` }}
+                />
+              </div>
+            </div>
+          )
+        ))}
+      </div>
     </form>
   );
 }
-
