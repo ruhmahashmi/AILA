@@ -1,18 +1,36 @@
-// app/components/SegmentList.js
+// components/SegmentList.js
 'use client';
+
+import { useEffect } from 'react';
+
 export default function SegmentList({ segments, activeSegmentId, onClickSegment }) {
+  useEffect(() => {
+    console.log('[SegmentList] Rendering', segments.length, 'segments:', segments.map(s => s.id));
+  }, [segments]);
+
   return (
-    <div className="border-b border-gray-300 py-2 overflow-auto max-h-56">
+    <div>
       <ul>
         {segments.map(segment => (
           <li key={segment.id}>
             <button
-              className={`block w-full text-left px-2 py-1 rounded hover:bg-gray-200 ${
-                activeSegmentId === segment.id ? 'bg-blue-100 font-semibold' : ''
-              }`}
-              onClick={() => onClickSegment(segment.id)}
+              type="button"
+              onClick={() => {
+                console.log("[SegmentList] Clicked segment id:", segment.id);
+                onClickSegment(segment.id);
+              }}
+              className={activeSegmentId === segment.id ? 'font-bold underline' : ''}
+              style={{
+                background: activeSegmentId === segment.id ? '#f0f0f0' : 'transparent',
+                border: 'none',
+                cursor: 'pointer',
+                marginBottom: '0.3em',
+                display: "block",
+                width: "100%",
+                textAlign: "left"
+              }}
             >
-              {segment.title || `Slide ${segment.segment_index + 1}`}
+              {segment.title} <span className="text-xs text-gray-400">[{segment.id.slice(0,6)}]</span>
             </button>
           </li>
         ))}
@@ -20,3 +38,4 @@ export default function SegmentList({ segments, activeSegmentId, onClickSegment 
     </div>
   );
 }
+

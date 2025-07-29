@@ -11,3 +11,11 @@ CREATE TABLE lecture_processing (
     error TEXT,
     started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE knowledge_graph (
+    id VARCHAR(36) PRIMARY KEY,
+    course_id VARCHAR(36),
+    week INTEGER,
+    node_data TEXT,
+    edge_data TEXT
+);

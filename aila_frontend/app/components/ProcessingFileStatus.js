@@ -1,12 +1,16 @@
-import useProcessingStatus from '../hooks/useProcessingStatus';
-import LectureResults from './LectureResults';
+// app/components/ProcessingFileStatus.js
+import useProcessingStatus from "../hooks/useProcessingStatus";
+import ProgressBar from "./ProgressBar";
 
-export default function ProcessingFileStatus({ courseId, fileName }) {
-  const { status, result, progress } = useProcessingStatus(courseId, fileName);
+export default function ProcessingFileStatus({ processingId, fileName }) {
+  const { progress, status, error } = useProcessingStatus(processingId);
+
   return (
-    <div className="mb-6">
-      <div className="font-semibold">{fileName}</div>
-      <LectureResults status={status} result={result} progress={progress} />
+    <div className="my-2 p-2 border rounded bg-white">
+      <div><strong>{fileName}</strong></div>
+      <div>Status: {status}</div>
+      {error && <div style={{ color: "red" }}>Error: {error}</div>}
+      <ProgressBar percent={progress} />
     </div>
   );
 }

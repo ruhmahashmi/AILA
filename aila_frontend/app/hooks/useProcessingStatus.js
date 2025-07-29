@@ -1,33 +1,32 @@
-import { useEffect, useState } from 'react';
+// app/hooks/useProcessingStatus.js
+import { useState, useEffect } from "react";
+import axios from "axios";
 
-export default function useProcessingStatus(courseId, fileName) {
-  const [status, setStatus] = useState('');
-  const [result, setResult] = useState(null);
+export default function useProcessingStatus(processingId) {
+  const [status, setStatus] = useState("pending");
   const [progress, setProgress] = useState(0);
+  const [error, setError] = useState(null);
 
   useEffect(() => {
-    if (!fileName) return;
-    setStatus('processing');
-    setProgress(0);
-    const interval = setInterval(async () => {
+    if (!processingId) return;
+
+    let interval = setInterval(async () => {
       try {
-        const res = await fetch(`http://localhost:8000/lecture-status?course_id=${courseId}&file_name=${fileName}`);
-        const data = await res.json();
-        setStatus(data.status);
-        setProgress(data.progress || 0);
-        if (data.status === 'done' || data.status === 'error') {
-          setResult(data.result || data.error);
-          clearInterval(interval);
-        }
-      } catch (err) {
-        setStatus('error');
-        setResult('Network error');
-        setProgress(100);
+        const res = await axios.get(
+          `http://localhost:8000/api/lecture-status/?processing_id=${processingId}`
+        );
+        setStatus(res.data.status);
+        setProgress(res.data.progress);
+        setError(res.data.error || null);
+        if (["done", "error"].includes(res.data.status)) clearInterval(interval);
+      } catch (e) {
+        setError("Network error");
         clearInterval(interval);
       }
-    }, 3000);
-    return () => clearInterval(interval);
-  }, [courseId, fileName]);
+    }, 2000);
 
-  return { status, result, progress };
+    return () => clearInterval(interval);
+  }, [processingId]);
+
+  return { progress, status, error };
 }

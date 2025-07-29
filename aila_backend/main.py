@@ -1,20 +1,26 @@
 from dotenv import load_dotenv
 load_dotenv()
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks
+import os
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, Body
+from fastapi import WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import Column, Integer, String, DateTime, create_engine, ForeignKey, Text, JSON, text as sql_text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
 from sqlalchemy.sql import func
+from sqlalchemy import text as sql_text
 from pydantic import BaseModel
 from pptx import Presentation
+from typing import List
+import asyncio
 import fitz  # PyMuPDF
 import hashlib
 import uuid
-import os
 import shutil
 import json
+import re
 import google.generativeai as genai
+
 
 genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
 
@@ -27,11 +33,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MYSQL_USER = os.environ.get("MYSQL_USER", "ailastaruser")
-MYSQL_PASSWORD = os.environ.get("MYSQL_PASSWORD", "yourpassword")
-MYSQL_HOST = os.environ.get("MYSQL_HOST", "localhost")
-MYSQL_DB = os.environ.get("MYSQL_DB", "ailastar")
-DATABASE_URL = f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}/{MYSQL_DB}"
+# MYSQL_USER = os.environ.get("MYSQL_USER", "ailastaruser")
+# MYSQL_PASSWORD = os.environ.get("MYSQL_PASSWORD", "yourpassword")
+# MYSQL_HOST = os.environ.get("MYSQL_HOST", "localhost")
+# MYSQL_DB = os.environ.get("MYSQL_DB", "ailastar")
+# DATABASE_URL = f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}/{MYSQL_DB}"
+
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///ailastar.db")
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {})
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=3600)
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
@@ -96,9 +105,40 @@ class MCQ(Base):
     options = Column(JSON, nullable=False)
     answer = Column(Text, nullable=True)
 
+class MCQReqModel(BaseModel):
+    course_id: str
+    week: int
+    segment_index: int
+    content: str
+
 class MCQPayload(BaseModel):
     segment_id: str
     content: str
+
+# Add WebSocket connection manager
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+
+    async def send_personal_message(self, message: str, websocket: WebSocket):
+        await websocket.send_text(message)
+
+    async def broadcast(self, message: str):
+        for connection in self.active_connections:
+            try:
+                await connection.send_text(message)
+            except:
+                # Connection might be closed
+                pass
+
+manager = ConnectionManager()
 
 def get_db():
     db = SessionLocal()
@@ -111,6 +151,44 @@ def get_db():
 def on_startup():
     Base.metadata.create_all(bind=engine)
 
+KEYWORD_BLACKLIST = set([
+    'slide','slides','page','pages','chapter','section',
+    'introduction','summary','conclusion','example','diagram',
+    'content','topic','concept','question','answer', '',
+    'ppt','presentation'
+])
+
+def is_good_keyword(word):
+    word = word.strip().lower()
+    if not word or len(word) < 2:
+        return False
+    if re.fullmatch(r'[\d\W]+', word):  # only numbers or punctuation
+        return False
+    # Only remove truly generic stuff, and never 'stack', 'queue', etc.
+    BLACKLIST = set(['slide','slides','page','pages','chapter','section','untitled'])
+    if word in BLACKLIST:
+        return False
+    if len(word.split()) > 5:
+        return False
+    if len(word) > 40:
+        return False
+    return True
+
+
+def clean_title(title):
+    if not title or not title.strip():
+        return None
+    title = title.strip()
+    title = re.sub(r'^(slide|page|chapter|section)[\s\-_]*\d*[:.\s-]*', '', title, flags=re.I)
+    title = re.sub(r'[\s\-_]*(slide|page|chapter|section)[\s\-_]*\d*\s*$', '', title, flags=re.I)
+    title_clean = title.strip()
+    if not title_clean or title_clean.lower() in KEYWORD_BLACKLIST:
+        return None
+    if len(title_clean) < 3 or re.fullmatch(r'\d+', title_clean):
+        return None
+    title_clean = re.sub(r'^[-:\s]+', '', title_clean)
+    return title_clean.strip() or None
+
 def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, processing_id):
     from llama_index.llms.gemini import Gemini
     db = SessionLocal()
@@ -119,6 +197,7 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
             "status": "processing", "progress": 0, "error_message": None
         })
         db.commit()
+        
         segments = []
         ext = os.path.splitext(filepath)[-1].lower()
         if ext == ".pdf":
@@ -159,84 +238,72 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
 
         llm = Gemini(model="models/gemini-2.5-flash")
         kg_nodes, kg_edges = [], []
+        seg_count = 0
 
         for idx, seg in enumerate(segments):
+            text = seg["text"]
+
+            # Extract concepts
+            concepts = []
             try:
-                text = seg["text"]
-                title = text.split('\n', 1)[0].strip() if text.strip() else f"Slide {seg['slide_num']}"
-                # LLM summary
+                prompt = (
+                    "From the following lecture slide text, extract 3 to 15 or more if possible, important key concepts or technical terms, max 3 to 5 words each. "
+                    "List each on its own line and don't repeat the concepts/terms. Do not include the words 'slide', 'page', numbers, or general words. "
+                    "For example, if a slide covers 'Hash Tables', 'Open Addressing', and 'Collisions', list each as its own concept.\n"
+                    f"Slide Text:\n{text[:1200]}"
+                )
+                raw = str(llm.complete(prompt))
+                print(f"[LLM RAW CONCEPTS] Slide idx={idx}", raw)
+                concept_candidates = [clean_title(re.sub(r'^[\*\-\d\.]+\s*', '', line).strip()) for line in raw.splitlines()]
+                concept_candidates = [c for c in concept_candidates if c]
+                concepts = [c for c in set(concept_candidates) if c and is_good_keyword(c)]
+                print(f"[FILTERED CONCEPTS] Slide idx={idx}", concepts)
+            except Exception as e:
+                print(f"[Keyword concept extraction failed]: {e}")
+                concepts = []
+
+            if not concepts:
+                first_line = text.split('\n', 1)[0].strip() if text.strip() else ""
+                fallback_concept = clean_title(first_line)
+                concepts = [fallback_concept] if fallback_concept else [f"Slide {seg['slide_num']}"]
+
+            for concept in concepts:
+                # Generate summary
                 try:
-                    summary = str(llm.complete(f"Summarize this lecture segment in 2 sentences:\n{text[:2000]}"))
+                    sum_prompt = (
+                        f"In 2–3 sentences, explain the concept '{concept}' in the context of the following lecture slide."
+                        f"\nSlide Text:\n{text[:1200]}"
+                    )
+                    summary = str(llm.complete(sum_prompt))
+                    print(f"[DEBUG SUMMARY] Concept: {concept}")
+                    print(f"[DEBUG SUMMARY] Generated: {summary[:100]}...")
                 except Exception as e:
+                    print(f"[DEBUG SUMMARY ERROR] Failed for concept '{concept}': {e}")
                     summary = ""
-                # Gemini keyword prompt (explicit & project-specific)
-                try:
-                    keyword_prompt = (
-                        "Given the following lecture slide/text, extract ONLY 4-5 of the most important, "
-                        "distinct technical keywords or key concepts that are specifically present in the text. "
-                        "Respond ONLY as a comma-separated list.\n"
-                        f"Text:\n{text[:1500]}"
-                    )
-                    raw_keywords = str(llm.complete(keyword_prompt))
-                    keywords = [k.strip() for k in raw_keywords.split(",") if k.strip()]
-                except Exception as e:
-                    keywords = []
 
-                # LLM KG extraction, robust Markdown fencing and JSON cleaning
-                try:
-                    kg_response = llm.complete(
-                        f"From this segment, extract key scientific concepts/entities and main direct relationships. "
-                        f"Respond as valid JSON with: nodes: [{{id, label}}], edges: [{{source, target, relation}}].\n{text[:1500]}"
-                    )
-                    kg_text = str(getattr(kg_response, "text", kg_response)).strip()
-                    if kg_text.startswith("```json"):
-                        kg_text = kg_text[len("```json"):].lstrip()
-                    if kg_text.startswith("```"):
-                        kg_text = kg_text[len("```"):].lstrip()
-                    if kg_text.endswith("```"):
-                        kg_text = kg_text[:-3].rstrip()
-                    lines = kg_text.splitlines()
-                    while lines and not lines.strip().startswith("{"):
-                        lines.pop(0)
-                    while lines and not lines[-1].strip().endswith("}"):
-                        lines.pop()
-                    kg_text = "\n".join(lines)
-                    try:
-                        kg = json.loads(kg_text)
-                    except Exception:
-                        kg = {"nodes": [], "edges": []}
-                    kg_nodes.extend(kg.get("nodes", []))
-                    kg_edges.extend(kg.get("edges", []))
-                except Exception as e:
-                    pass
-
-                # Save segment to DB
                 seg_db = Segment(
                     id=str(uuid.uuid4()), upload_id=upload_id, course_id=course_id, week=week,
-                    segment_index=idx, title=title, content=text,
-                    keywords=",".join(keywords),
+                    segment_index=idx, title=concept, content=text,
+                    keywords=concept,
                     summary=summary,
                 )
                 db.add(seg_db)
-                percent = int(((idx + 1) / total_steps) * 100)
-                db.query(LectureProcessing).filter(LectureProcessing.id == processing_id).update({
-                    "progress": percent,
-                    "status": "processing"
-                })
-                db.commit()
+                print(f"[DEBUG] Saved segment: title={concept!r} idx={idx}, summary_preview={summary[:30]!r}")
+                seg_count += 1
 
-            except Exception as e:
-                db.query(LectureProcessing).filter(LectureProcessing.id == processing_id).update({
-                    "status": "error",
-                    "progress": int(((idx + 1) / total_steps) * 100),
-                    "error_message": f"Slide {idx+1} failed: {e}"
-                })
-                db.commit()
-                db.close()
-                return
+            percent = int(((idx + 1) / total_steps) * 100)
+            db.query(LectureProcessing).filter(LectureProcessing.id == processing_id).update({
+                "progress": percent,
+                "status": "processing"
+            })
+            db.commit()
 
+        print(f"[INFO] Total segments (concepts) created: {seg_count}")
+
+        # Final commit
         db.commit()
-        # Save KG to DB
+        
+        # Save KG
         try:
             unique_nodes = {n['id']: n for n in kg_nodes if 'id' in n}.values() if kg_nodes else []
             unique_edges = [
@@ -256,14 +323,21 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
             )
             db.commit()
         except Exception as ex:
+            print(f"[KG SAVE ERROR]: {ex}")
             db.rollback()
+        
+        # Mark as done
         db.query(LectureProcessing).filter(LectureProcessing.id == processing_id).update({
             "status": "done",
             "progress": 100,
             "error_message": None
         })
         db.commit()
+        
+        print(f"[PROCESSING COMPLETE] Course: {course_id}, Week: {week}, Segments: {seg_count}")
+        
     except Exception as e:
+        print(f"[PROCESSING ERROR]: {str(e)}")
         db.query(LectureProcessing).filter(LectureProcessing.id == processing_id).update({
             "status": "error",
             "progress": 0,
@@ -272,6 +346,63 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
         db.commit()
     finally:
         db.close()
+
+
+def extract_mcqs_from_response(resp):
+    """
+    Attempt to extract MCQ list from the LLM output, whether JSON or plain text.
+    Returns a list of dicts with question/options/answer.
+    """
+    # Try to find the first {...} or [...] block (JSON) and parse it
+    # If not, fall back to regex or bullet/numbered parsing
+    try:
+        # If LLM returns a codeblock: ``````
+        match = re.search(r'``````', resp, re.DOTALL)
+        text = match.group(1) if match else resp
+
+        # Locate first { or [ for JSON fix
+        first_brace = text.find("{")
+        first_bracket = text.find("[")
+        if first_brace != -1 and (first_bracket == -1 or first_brace < first_bracket):
+            text = text[first_brace:]
+        elif first_bracket != -1:
+            text = text[first_bracket:]
+
+        # Fix potentially not-closed blocks
+        last_brace = text.rfind("}")
+        last_bracket = text.rfind("]")
+        if last_brace != -1:
+            text = text[:last_brace+1]
+        elif last_bracket != -1:
+            text = text[:last_bracket+1]
+
+        items = json.loads(text)
+        # Accept either an object with "mcqs" or a list of MCQs
+        if isinstance(items, dict) and "mcqs" in items:
+            return items["mcqs"]
+        if isinstance(items, list):
+            return items
+        return []
+    except Exception:
+        # Plaintext fallback: extract MCQ-like blocks (very basic)
+        lines = [l.strip() for l in resp.splitlines() if l.strip()]
+        out = []
+        q, opts = None, []
+        for line in lines:
+            if line.lower().startswith("question"):
+                if q and opts:
+                    out.append({"question": q, "options": opts, "answer": opts[0]})
+                q = line.split(":", 1)[-1].strip()
+                opts = []
+            elif re.match(r"^[a-dA-D]\.", line):
+                opts.append(line[2:].strip())
+            elif line.startswith("Answer:"):
+                ans = line.split(":", 1)[-1].strip()
+                if q and opts:
+                    out.append({"question": q, "options": opts, "answer": ans})
+                q, opts = None, []
+        return out
+
 
 # ==== LECTURE UPLOAD, PROCESSING, AND STATUS ====
 
@@ -360,11 +491,39 @@ async def get_kg(course_id: str, week: int, db: Session = Depends(get_db)):
 
 # ==== RETRIEVAL PRACTICE: MCQ GENERATION (basic stub) ====
 @app.post("/api/generate-mcqs/")
-async def generate_mcqs(segment_id: str = Form(...), db: Session = Depends(get_db)):
-    # Placeholder: implement with your Gemini LLM function or similar
-    return {"mcqs": [
-        {"question": "What is an example MCQ?", "options": ["A", "B", "C", "D"], "answer": "A"}
-    ]}
+async def generate_mcqs(payload: MCQReqModel = Body(...)):
+    """
+    Generate MCQs for a segment using Google Gemini.
+    """
+    prompt = (
+        "Given the following lecture content, generate 3 multiple-choice questions (MCQs) with exactly 4 options each. "
+        "Include the correct answer for each as an 'answer' field. "
+        "Respond ONLY in JSON as a list, e.g.:\n"
+        "[{\"question\": \"...\", \"options\": [\"...\", \"...\", \"...\", \"...\"], \"answer\": \"...\"}, ...]\n"
+        f"\nLecture Content:\n{payload.content[:1800]}"
+    )
+
+    try:
+        model = genai.GenerativeModel("gemini-1.5-flash")  # Or "gemini-pro" if that's what you use.
+        response = model.generate_content(prompt)
+        # Pull .text or .candidates etc, depending on sdk version
+        model_output = str(getattr(response, "text", getattr(response, "candidates", response)))
+        mcqs = extract_mcqs_from_response(model_output)
+        # Post-process: ensure only questions with all fields
+        out = []
+        for item in mcqs:
+            if isinstance(item, dict) and all(k in item for k in ("question", "options", "answer")) and len(item["options"]) == 4:
+                out.append(item)
+        return {"mcqs": out if out else [{"question": "LLM returned no MCQs.", "options": [], "answer": ""}]}
+    except Exception as ex:
+        print("[MCQ GENERATION ERROR]", ex)
+        # Fallback dummy
+        return {"mcqs": [{
+            "question": "Sample fallback MCQ: LLM Error, please try again.",
+            "options": ["A", "B", "C", "D"],
+            "answer": "A"
+        }]}
+
 
 @app.get("/api/mcqs/")
 async def get_mcqs(segment_id: str, db: Session = Depends(get_db)):
@@ -486,7 +645,33 @@ async def create_module(name: str = Form(...), course_id: str = Form(...), week:
         "course_id": mod.course_id
     }
 
+@app.get("/api/debug/segment/{segment_id}")
+async def debug_segment(segment_id: str, db: Session = Depends(get_db)):
+    s = db.query(Segment).filter_by(id=segment_id).first()
+    if not s:
+        raise HTTPException(status_code=404, detail="Segment not found")
+    return {
+        "id": s.id,
+        "title": s.title,
+        "content": s.content[:200] + "..." if s.content else None,
+        "summary": s.summary,
+        "keywords": s.keywords,
+        "summary_length": len(s.summary) if s.summary else 0,
+        "has_summary": bool(s.summary and s.summary.strip())
+    }
+
+# Add WebSocket endpoint
+@app.websocket("/ws/{course_id}/{week}")
+async def websocket_endpoint(websocket: WebSocket, course_id: str, week: int):
+    await manager.connect(websocket)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            # Echo back for now, can be used for real-time updates
+            await manager.send_personal_message(f"Message: {data}", websocket)
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
 
 @app.get("/")
 async def root():
-    return {"message": "AILA Backend (MySQL) is running"}
+    return {"message": "AILA Backend (SQLite) is running"}

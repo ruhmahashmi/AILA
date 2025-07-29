@@ -8,15 +8,11 @@ export default function InstructorDashboard() {
   const [newCourse, setNewCourse] = useState('');
   const [roleChecked, setRoleChecked] = useState(false);
   const [userId, setUserId] = useState(null);
-  const [error, setError] = useState(null);
   const router = useRouter();
 
   // Role and login check
   useEffect(() => {
-    let stored = null;
-    if (typeof window !== 'undefined') {
-      stored = localStorage.getItem('user');
-    }
+    const stored = typeof window !== 'undefined' ? localStorage.getItem('user') : null;
     if (!stored) {
       router.replace('/login');
       return;
@@ -34,6 +30,19 @@ export default function InstructorDashboard() {
     }
   }, [router]);
 
+  // Defensive fetch: always set courses to array, never null
+  async function fetchCourses() {
+    setLoading(true);
+    try {
+      const res = await fetch(`http://localhost:8000/api/courses?instructor_id=${userId}`);
+      const data = await res.ok ? await res.json() : [];
+      setCourses(Array.isArray(data) ? data : []);
+    } catch (e) {
+      setCourses([]); // On network/backend error
+    }
+    setLoading(false);
+  }
+
   // Fetch courses for this instructor
   useEffect(() => {
     if (!roleChecked || !userId) return;
@@ -41,58 +50,21 @@ export default function InstructorDashboard() {
     // eslint-disable-next-line
   }, [roleChecked, userId]);
 
-  async function fetchCourses() {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch(`http://localhost:8000/api/courses?instructor_id=${userId}`);
-      // Defensive fallback for non-200 responses or invalid JSON:
-      if (!res.ok) {
-        setCourses([]);
-        const errMsg = `Server returned ${res.status}: ${(await res.text()) || res.statusText}`;
-        setError(errMsg);
-        setLoading(false);
-        return;
-      }
-      const data = await res.json();
-      if (!Array.isArray(data)) {
-        setCourses([]);
-        setError('Invalid course data: not an array');
-        setLoading(false);
-        return;
-      }
-      setCourses(data);
-      setError(null);
-    } catch (e) {
-      setCourses([]);
-      setError('Failed to fetch courses: ' + e.message);
-    }
-    setLoading(false);
-  }
-
   async function handleCreateCourse(e) {
     e.preventDefault();
     if (!newCourse) return;
-    setError(null);
-    try {
-      const formData = new FormData();
-      formData.append("name", newCourse);
-      formData.append("instructor_id", userId);
 
-      const res = await fetch('http://localhost:8000/api/courses', {
-        method: 'POST',
-        body: formData,
-      });
+    const formData = new FormData();
+    formData.append("name", newCourse);
+    formData.append("instructor_id", userId);
 
-      if (!res.ok) {
-        setError('Could not create course: ' + (await res.text()));
-      } else {
-        setNewCourse('');
-        fetchCourses();
-      }
-    } catch (e) {
-      setError('Could not create course: ' + e.message);
-    }
+    await fetch('http://localhost:8000/api/courses', {
+      method: 'POST',
+      body: formData,
+    });
+
+    setNewCourse('');
+    fetchCourses();
   }
 
   if (!roleChecked) return <div className="p-8">Checking authorization…</div>;
@@ -119,14 +91,11 @@ export default function InstructorDashboard() {
           Create Course
         </button>
       </form>
-      {error && (
-        <div className="mb-4 text-red-600">{error}</div>
-      )}
       {loading ? (
         <div className="text-gray-500">Loading courses...</div>
       ) : (
         <div className="grid gap-4">
-          {Array.isArray(courses) && courses.length === 0 ? (
+          {(!courses || courses.length === 0) ? (
             <div className="text-gray-500">No courses yet.</div>
           ) : (
             (Array.isArray(courses) ? courses : []).map(course => (

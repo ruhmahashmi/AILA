@@ -1,55 +1,49 @@
+// aila_frontend/app/components/ProcessingHistory.js
+'use client';
 import { useEffect, useState } from 'react';
-import ProgressBar from './ProgressBar';
 
-export default function ProcessingHistory({ courseId, onViewResult }) {
-  const [jobs, setJobs] = useState([]);
+export default function ProcessingHistory({ courseId }) {
+  const [history, setHistory] = useState([]);
 
   useEffect(() => {
-    async function fetchHistory() {
-      const res = await fetch(`http://localhost:8000/lecture-history/?course_id=${courseId}`);
-      const data = await res.json();
-      setJobs(data || []);
-    }
-    if (courseId) fetchHistory();
+    if (!courseId) return;
+    fetch(`http://localhost:8000/api/lecture-history/?course_id=${courseId}`)
+      .then(res => res.json())
+      .then(data => setHistory(data || []));
   }, [courseId]);
 
   return (
-    <section className="mb-8">
-      <h2 className="text-xl font-semibold mb-2">Processing History</h2>
-      <table className="w-full text-sm">
-        <thead>
-          <tr>
-            <th className="text-left">File Name</th>
-            <th>Status</th>
-            <th>Progress</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {jobs.map(job => (
-            <tr key={job.id}>
-              <td>{job.file_name}</td>
-              <td>{job.status}</td>
-              <td style={{ minWidth: 100 }}>
-                <ProgressBar value={job.progress || 0} />
-              </td>
-              <td>
-                {job.status === 'done' && (
-                  <button
-                    className="text-blue-700 underline"
-                    onClick={() => onViewResult(job)}
-                  >
-                    View Results
-                  </button>
-                )}
-                {job.status === 'error' && (
-                  <span className="text-red-600">Error</span>
-                )}
-              </td>
+    <div className="mt-6">
+      <h3 className="font-semibold mb-2">Processing History</h3>
+      <div className="bg-gray-50 border rounded">
+        <table className="w-full text-sm">
+          <thead>
+            <tr>
+              <th className="px-2 py-1 text-left">File Name</th>
+              <th className="px-2 py-1 text-left">Week</th>
+              <th className="px-2 py-1 text-left">Status</th>
+              <th className="px-2 py-1 text-left">Progress</th>
+              <th className="px-2 py-1 text-left">Error</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
-    </section>
+          </thead>
+          <tbody>
+            {history.map(job => (
+              <tr key={job.id}>
+                <td className="px-2 py-1">{job.file_name}</td>
+                <td className="px-2 py-1">{job.week}</td>
+                <td className="px-2 py-1">
+                  {job.status === "done" && <span className="text-green-700">Done</span>}
+                  {job.status === "error" && <span className="text-red-700">Error</span>}
+                  {job.status === "processing" && <span className="text-blue-700">Processing</span>}
+                  {job.status === "pending" && <span className="text-yellow-600">Pending</span>}
+                </td>
+                <td className="px-2 py-1">{job.progress}%</td>
+                <td className="px-2 py-1 text-red-600">{job.error || ""}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }

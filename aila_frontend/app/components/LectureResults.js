@@ -1,5 +1,5 @@
+// app/components/LectureResults.js
 import ProgressBar from './ProgressBar';
-
 export default function LectureResults({ status, result, progress }) {
   if (status === 'pending' || status === 'processing') {
     return <ProgressBar value={progress} label={`Processing: ${progress.toFixed(0)}%`} />;
