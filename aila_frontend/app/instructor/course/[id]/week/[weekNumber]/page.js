@@ -10,66 +10,30 @@ import SegmentList from '../../../../../components/SegmentList';
 import SlideViewer from '../../../../../components/SlideViewer';
 
 const BACKEND_URL = "http://localhost:8000";
-const WEEK_COUNT = 11; // Weeks 1–11
-
-console.log('🟢 [WEEK PAGE] is rendering!');
+const WEEK_COUNT = 11;
 
 export default function CourseWeekPage({ params }) {
   const { id: courseId, weekNumber } = params;
   const router = useRouter();
 
-  const [segments, setSegments] = useState([]);
-  const [activeSegmentId, setActiveSegmentId] = useState(null);
-  const [activeSegment, setActiveSegment] = useState(null);
+  const [knowledgeGraph, setKnowledgeGraph] = useState({ nodes: [], edges: [] });
+  const [activeConceptId, setActiveConceptId] = useState(null);
   const [processingFiles, setProcessingFiles] = useState([]);
 
-  // --- New: for KG auto-refresh/use (optional: use if needed elsewhere)
-  const [knowledgeGraph, setKnowledgeGraph] = useState({ nodes: [], edges: [] });
-
-  // Debug: render info
+  // Auto-select first concept when knowledgeGraph loads
   useEffect(() => {
-    console.log('[RENDER]', {
-      activeSegmentId,
-      weekNumber,
-      courseId,
-      segmentTitles: segments.map(s => `${s.title} (${s.id})`),
-    });
-  }, [activeSegmentId, weekNumber, courseId, segments]);
+    if (knowledgeGraph.nodes.length > 0 && !activeConceptId) {
+      setActiveConceptId(knowledgeGraph.nodes[0].id);
+    }
+  }, [knowledgeGraph.nodes, activeConceptId]);
 
-  // Fetch all segments when course or week changes
+  // Fetch KG and reset active concept on course/week change
   useEffect(() => {
-    fetchSegments();
     fetchKnowledgeGraph();
-    setActiveSegmentId(null);
-    setActiveSegment(null);
+    setActiveConceptId(null);
   }, [courseId, weekNumber]);
 
-  // Auto-select first segment if none selected/invalid
-  useEffect(() => {
-    if (segments.length > 0 && (!activeSegmentId || !segments.some(s => s.id === activeSegmentId))) {
-      setActiveSegmentId(segments[0].id);
-    }
-  }, [segments]); // only segments
-
-  // Fetch segment details whenever activeSegmentId changes
-  useEffect(() => {
-    if (!activeSegmentId) {
-      setActiveSegment(null);
-      return;
-    }
-    fetch(`${BACKEND_URL}/api/segment/${activeSegmentId}`)
-      .then(res => {
-        if (!res.ok) throw new Error(`Failed to fetch segment ${activeSegmentId}: ${res.statusText}`);
-        return res.json();
-      })
-      .then(data => setActiveSegment(data))
-      .catch(err => {
-        console.error('[FetchDetail] Error:', err);
-        setActiveSegment(null);
-      });
-  }, [activeSegmentId]);
-
-  // Polling for processing jobs, refresh when done
+  // Monitor lecture processing
   useEffect(() => {
     if (processingFiles.length === 0) return;
     const interval = setInterval(() => {
@@ -83,9 +47,7 @@ export default function CourseWeekPage({ params }) {
       ).then(results => {
         const doneJobs = results.filter(r => r.status === 'done');
         if (doneJobs.length > 0) {
-          fetchSegments();
-          fetchKnowledgeGraph();    // also refresh KG after processing is done!
-          // Remove finished jobs from the list
+          fetchKnowledgeGraph();
           setProcessingFiles(prev =>
             prev.filter(f => !doneJobs.some(done => done.processingId === f.processingId))
           );
@@ -100,43 +62,22 @@ export default function CourseWeekPage({ params }) {
         }
       });
     }, 3000);
-
     return () => clearInterval(interval);
   }, [processingFiles, courseId, weekNumber]);
 
-  // Fetch segments
-  function fetchSegments() {
-    fetch(`${BACKEND_URL}/api/segments/?course_id=${courseId}&week=${weekNumber}`)
-      .then(res => {
-        if (!res.ok) throw new Error('Failed to fetch segments');
-        return res.json();
-      })
-      .then(data => setSegments(data))
-      .catch(err => {
-        console.error('[fetchSegments] error:', err);
-        setSegments([]);
-      });
-  }
-
-  // Fetch KG for this course/week (used for auto-refresh after processing, can be passed down as needed)
   function fetchKnowledgeGraph() {
     fetch(`${BACKEND_URL}/api/knowledge-graph/?course_id=${courseId}&week=${weekNumber}`)
       .then(res => res.json())
       .then(data => setKnowledgeGraph(data))
       .catch(() => setKnowledgeGraph({ nodes: [], edges: [] }));
   }
-  
-  // On segment list click
-  const handleClickSegment = id => {
-    setActiveSegmentId(id);
-  };
 
-  // New file processing
+  const handleClickConcept = id => setActiveConceptId(id);
+
   const handleProcessingStarted = (processingId, fileName) => {
     setProcessingFiles(prev => [...prev, { processingId, fileName }]);
   };
 
-  // Sidebar UI - Weeks 1–11, with link routing
   const WeekSelector = () => (
     <div className="w-48 border-r border-gray-300 p-4 bg-white">
       <h3 className="font-semibold mb-2">Select Week</h3>
@@ -144,9 +85,7 @@ export default function CourseWeekPage({ params }) {
         {Array.from({ length: WEEK_COUNT }, (_, i) => i + 1).map(w => (
           <li key={w}>
             <button
-              className={`block w-full text-left px-2 py-1 rounded hover:bg-blue-50 ${
-                String(weekNumber) === String(w) ? 'bg-blue-200 font-bold text-blue-700' : ''
-              }`}
+              className={`block w-full text-left px-2 py-1 rounded hover:bg-blue-50 ${String(weekNumber) === String(w) ? 'bg-blue-200 font-bold text-blue-700' : ''}`}
               onClick={() => {
                 if (String(weekNumber) !== String(w))
                   router.push(`/instructor/course/${courseId}/week/${w}`);
@@ -160,10 +99,12 @@ export default function CourseWeekPage({ params }) {
     </div>
   );
 
+  // Get currently selected concept node
+  const activeConcept = knowledgeGraph.nodes.find(node => node.id === activeConceptId);
+
   return (
     <div className="flex space-x-0 h-screen bg-gray-50">
       <WeekSelector />
-
       <div className="flex-1 flex flex-col space-y-4 p-4">
         <h1>Upload Lecture Materials</h1>
         <UploadLectureForm
@@ -171,7 +112,6 @@ export default function CourseWeekPage({ params }) {
           weekNumber={weekNumber}
           onProcessingStarted={handleProcessingStarted}
         />
-
         {processingFiles.length > 0 && (
           <>
             <h2>Currently Processing</h2>
@@ -184,29 +124,25 @@ export default function CourseWeekPage({ params }) {
             ))}
           </>
         )}
-
-        <button
-          onClick={() => fetchSegments()}
-          className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded mb-2 w-40"
-        >
-          🔄 Refresh Segments
-        </button>
-
         <div className="flex flex-1 space-x-4">
-          <div className="w-1/3">
+          <div className="w-1/3" style={{ maxHeight: "90vh", overflowY: "auto" }}>
+            {/* Concept navigation */}
             <SegmentList
-              segments={segments}
-              activeSegmentId={activeSegmentId}
-              onClickSegment={handleClickSegment}
+              concepts={knowledgeGraph.nodes}
+              activeConceptId={activeConceptId}
+              onClickConcept={handleClickConcept}
             />
             <div className="mt-6">
               <ProcessingHistory courseId={courseId} />
             </div>
           </div>
           <div className="flex-1">
-            <SlideViewer segment={activeSegment} />
-            {/* Pass knowledgeGraph to SlideViewer if you want to display it directly */}
-            {/* <SlideViewer segment={activeSegment} knowledgeGraph={knowledgeGraph} /> */}
+            {/* --- FIX: Pass courseId and weekNumber to SlideViewer --- */}
+            <SlideViewer
+              concept={activeConcept}
+              courseId={courseId}
+              week={weekNumber}
+            />
           </div>
         </div>
       </div>

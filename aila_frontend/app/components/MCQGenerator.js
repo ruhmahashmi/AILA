@@ -7,7 +7,10 @@ export default function MCQGenerator({ courseId, week, segmentIndex, segmentId, 
   const [loadingKG, setLoadingKG] = useState(false);
   const [error, setError] = useState(null);
 
-  // Generate from RAW segment (main content)
+  // --- DEBUG: ---
+  // Uncomment this below to debug prop flow.
+  // console.log("[MCQGenerator] courseId=", courseId, "week=", week, "segmentId=", segmentId);
+
   async function handleGenerateRaw() {
     setLoading(true);
     setError(null);
@@ -17,7 +20,7 @@ export default function MCQGenerator({ courseId, week, segmentIndex, segmentId, 
         course_id: String(courseId),
         week: Number(week),
         segment_index: Number(segmentIndex),
-        content: segmentContent ?? "", // ensure content is always a string!
+        content: segmentContent ?? "",
       };
       const res = await fetch("http://localhost:8000/api/generate-mcqs/", {
         method: "POST",
@@ -33,7 +36,6 @@ export default function MCQGenerator({ courseId, week, segmentIndex, segmentId, 
     setLoading(false);
   }
 
-  // Generate from Knowledge Graph (RAG)
   async function handleGenerateKG() {
     setLoadingKG(true);
     setError(null);

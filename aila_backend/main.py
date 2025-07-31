@@ -12,6 +12,7 @@ from sqlalchemy import text as sql_text
 from pydantic import BaseModel
 from pptx import Presentation
 from typing import List
+from collections import defaultdict
 import asyncio
 import fitz  # PyMuPDF
 import hashlib
@@ -245,13 +246,15 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
             return
 
         llm = Gemini(model="models/gemini-2.5-flash")
-        kg_nodes = []
-        kg_edges = []
+        concept_info = defaultdict(lambda: {
+            "slide_indices": [],
+            "slide_nums": [],
+            "summaries": [],
+            "contents": [],
+        })
         seg_count = 0
-
         for idx, seg in enumerate(segments):
             text = seg["text"]
-            # --- Extract concepts as before ---
             concepts = []
             try:
                 prompt = (
@@ -261,11 +264,11 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
                     f"Slide Text:\n{text[:1200]}"
                 )
                 raw = str(llm.complete(prompt))
-                print(f"[LLM RAW CONCEPTS] Slide idx={idx}", raw)
+                print(f"[LLM RAW CONCEPTS] Slide idx={idx} {raw}")
                 concept_candidates = [clean_title(re.sub(r'^[\*\-\d\.]+\s*', '', line).strip()) for line in raw.splitlines()]
                 concept_candidates = [c for c in concept_candidates if c]
                 concepts = [c for c in set(concept_candidates) if c and is_good_keyword(c)]
-                print(f"[FILTERED CONCEPTS] Slide idx={idx}", concepts)
+                print(f"[FILTERED CONCEPTS] Slide idx={idx} {concepts}")
             except Exception as e:
                 print(f"[Keyword concept extraction failed]: {e}")
                 concepts = []
@@ -273,29 +276,24 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
             if not concepts:
                 first_line = text.split('\n', 1)[0].strip() if text.strip() else ""
                 fallback_concept = clean_title(first_line)
-                concepts = [fallback_concept] if fallback_concept else [f"Slide {seg['slide_num']}"]
+                concepts = [fallback_concept] if fallback_concept else [f"Slide {seg.get('slide_num', idx)}"]
 
-            # ========== ADD ALL CONCEPTS TO KG NODES ==========
             for concept in concepts:
-                # Give a unique ID using concept name and slide index
-                kg_nodes.append({
-                    "id": f"{idx}-{concept.replace(' ', '_')[:32]}",  # 32 char limit for sanity
-                    "label": concept,
-                    "segment_index": idx,
-                    "slide_num": seg.get("slide_num")
-                })
-                # (Optional: build edges here if relationships are known)
-
-                # --- generate summaries and save segments as before
+                # Only aggregate, don't build kg_nodes yet!
+                concept_info[concept]["slide_indices"].append(idx)
+                concept_info[concept]["slide_nums"].append(seg.get("slide_num"))
+                concept_info[concept]["contents"].append(text)
                 try:
                     sum_prompt = (
                         f"In 2–3 sentences, explain the concept '{concept}' in the context of the following lecture slide."
                         f"\nSlide Text:\n{text[:1200]}"
                     )
-                    summary = str(llm.complete(sum_prompt))
+                    summary = str(llm.complete(sum_prompt)).strip()
                 except Exception as e:
                     summary = ""
+                concept_info[concept]["summaries"].append(summary)
 
+                # (Optional: save per-segment for legacy view)
                 seg_db = Segment(
                     id=str(uuid.uuid4()), upload_id=upload_id, course_id=course_id, week=week,
                     segment_index=idx, title=concept, content=text,
@@ -307,36 +305,47 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
 
             percent = int(((idx + 1) / total_steps) * 100)
             db.query(LectureProcessing).filter(LectureProcessing.id == processing_id).update({
-                "progress": percent,
-                "status": "processing"
+                "progress": percent, "status": "processing"
             })
             db.commit()
 
-        print(f"[INFO] Total KG nodes created: {len(kg_nodes)}")
+        # ---- FINAL: Only after all segments, create unique node PER CONCEPT ----
+        kg_nodes = []
+        for concept, info in concept_info.items():
+            kg_nodes.append({
+                "id": concept.replace(" ", "_")[:48],
+                "label": concept,
+                "slide_indices": info["slide_indices"],
+                "slide_nums": info["slide_nums"],
+                "summary": "\n\n".join(s for s in info["summaries"] if s).strip(),
+                "contents": "\n\n".join(c for c in info["contents"] if c)[:2000],
+                "count": len(info["slide_indices"])
+            })
 
-        # === FINAL: Save KG ===
-        try:
-            # Remove duplicate nodes by (id)
-            unique_nodes = list({n['id']: n for n in kg_nodes if 'id' in n}.values())
-            unique_edges = [
-                dict(t) for t in {tuple(sorted(e.items())) for e in kg_edges if isinstance(e, dict)}
-            ] if kg_edges else []
-            db.execute(
-                sql_text("INSERT INTO knowledge_graph "
-                         "(id, course_id, week, node_data, edge_data) VALUES "
-                         "(:id, :course_id, :week, :node_data, :edge_data)"),
-                {
-                    "id": str(uuid.uuid4()),
-                    "course_id": course_id,
-                    "week": week,
-                    "node_data": json.dumps(unique_nodes),
-                    "edge_data": json.dumps(unique_edges),
-                }
-            )
-            db.commit()
-        except Exception as ex:
-            print(f"[KG SAVE ERROR]: {ex}")
-            db.rollback()
+        print(f"[DEDUP KG] Final unique concepts: {len(kg_nodes)}")
+        for node in kg_nodes:
+            print(f" - {node['label']}: found on slides {node['slide_nums']} ({node['count']} times)")
+
+        db.execute(
+            sql_text("DELETE FROM knowledge_graph WHERE course_id=:course_id AND week=:week"),
+            {"course_id": course_id, "week": week}
+        )
+        db.commit()
+        db.execute(
+            sql_text(
+                "INSERT INTO knowledge_graph "
+                "(id, course_id, week, node_data, edge_data) VALUES "
+                "(:id, :course_id, :week, :node_data, :edge_data)"
+            ),
+            {
+                "id": str(uuid.uuid4()),
+                "course_id": course_id,
+                "week": week,
+                "node_data": json.dumps(kg_nodes),
+                "edge_data": json.dumps([]),
+            }
+        )
+        db.commit()
 
         db.query(LectureProcessing).filter(LectureProcessing.id == processing_id).update({
             "status": "done",
@@ -480,8 +489,8 @@ async def get_segment_detail(segment_id: str, db: Session = Depends(get_db)):
 @app.get("/api/knowledge-graph/")
 async def get_kg(course_id: str, week: int, db: Session = Depends(get_db)):
     row = db.execute(
-        "SELECT node_data, edge_data FROM knowledge_graph WHERE course_id=%s AND week=%s",
-        (course_id, week)
+        sql_text("SELECT node_data, edge_data FROM knowledge_graph WHERE course_id=:course_id AND week=:week"),
+        {"course_id": course_id, "week": week}
     ).fetchone()
     if row:
         return {"nodes": json.loads(row[0]), "edges": json.loads(row[1])}
@@ -526,6 +535,10 @@ async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_
     Generate MCQs using Knowledge Graph nodes/edges context (RAG style).
     Inputs: course_id, week, segment_id (OPTIONAL: content)
     """
+    print(f"[DEBUG] MCQ_KG payload: {payload!r}")
+    course_id = payload.get("course_id")
+    week = payload.get("week")
+    print(f"[DEBUG] Fetching KG for course_id={course_id!r}, week={week!r}")
     course_id = payload.get("course_id")
     week = payload.get("week")
     segment_id = payload.get("segment_id")

@@ -1,36 +1,34 @@
 // components/SegmentList.js
 'use client';
 
-import { useEffect } from 'react';
-
-export default function SegmentList({ segments, activeSegmentId, onClickSegment }) {
-  useEffect(() => {
-    console.log('[SegmentList] Rendering', segments.length, 'segments:', segments.map(s => s.id));
-  }, [segments]);
-
+export default function SegmentList({ concepts, activeConceptId, onClickConcept }) {
+  if (!concepts?.length) return <div>No concepts found for this week.</div>;
   return (
     <div>
       <ul>
-        {segments.map(segment => (
-          <li key={segment.id}>
+        {concepts.map(concept => (
+          <li key={concept.id} style={{ marginBottom: "0.2em" }}>
             <button
               type="button"
-              onClick={() => {
-                console.log("[SegmentList] Clicked segment id:", segment.id);
-                onClickSegment(segment.id);
-              }}
-              className={activeSegmentId === segment.id ? 'font-bold underline' : ''}
+              onClick={() => onClickConcept(concept.id)}
+              className={activeConceptId === concept.id ? 'font-bold underline' : ''}
               style={{
-                background: activeSegmentId === segment.id ? '#f0f0f0' : 'transparent',
+                background: activeConceptId === concept.id ? '#f0f0f0' : 'transparent',
                 border: 'none',
                 cursor: 'pointer',
-                marginBottom: '0.3em',
+                padding: 5,
+                borderRadius: 4,
                 display: "block",
                 width: "100%",
                 textAlign: "left"
               }}
             >
-              {segment.title} <span className="text-xs text-gray-400">[{segment.id.slice(0,6)}]</span>
+              {concept.label}
+              {concept.slide_nums && concept.slide_nums.length > 0 &&
+                <span className="text-xs text-gray-500 ml-2">
+                  ({concept.slide_nums.length > 1 ? "slides" : "slide"}: {concept.slide_nums.join(',')})
+                </span>
+              }
             </button>
           </li>
         ))}
@@ -38,4 +36,3 @@ export default function SegmentList({ segments, activeSegmentId, onClickSegment 
     </div>
   );
 }
-
