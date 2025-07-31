@@ -1,11 +1,9 @@
 // components/SlideViewer.js
 'use client';
-import React, { useState } from 'react';
+import React from "react";
+import MCQGenerator from "./MCQGenerator"; // Adjust if your code location differs
 
 export default function SlideViewer({ segment }) {
-  // Debug log what you receive from the backend
-  console.log('[SlideViewer] Received segment:', segment);
-
   if (!segment) {
     return (
       <div style={{ padding: 16, color: '#888' }}>
@@ -13,6 +11,12 @@ export default function SlideViewer({ segment }) {
       </div>
     );
   }
+
+  const courseId = segment.course_id || segment.courseId || "";
+  const week = segment.week || segment.weekNumber || "";
+  const segmentIndex = segment.segment_index;
+  const segmentId = segment.id;
+  const segmentContent = segment.content || "";
 
   return (
     <div style={{ border: '1px solid #eee', padding: 16, borderRadius: 8 }}>
@@ -45,6 +49,13 @@ export default function SlideViewer({ segment }) {
           fontSize: 13
         }}>{segment.content}</pre>
       </div>
+      <MCQGenerator
+        courseId={courseId}
+        week={week}
+        segmentIndex={segmentIndex}
+        segmentId={segmentId}
+        segmentContent={segmentContent}
+      />
     </div>
   );
 }

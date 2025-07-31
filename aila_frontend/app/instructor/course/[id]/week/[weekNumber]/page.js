@@ -1,3 +1,4 @@
+// app/instructor/course/[id]/week/[weekNumber]/page.js
 'use client';
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
@@ -22,6 +23,9 @@ export default function CourseWeekPage({ params }) {
   const [activeSegment, setActiveSegment] = useState(null);
   const [processingFiles, setProcessingFiles] = useState([]);
 
+  // --- New: for KG auto-refresh/use (optional: use if needed elsewhere)
+  const [knowledgeGraph, setKnowledgeGraph] = useState({ nodes: [], edges: [] });
+
   // Debug: render info
   useEffect(() => {
     console.log('[RENDER]', {
@@ -35,6 +39,7 @@ export default function CourseWeekPage({ params }) {
   // Fetch all segments when course or week changes
   useEffect(() => {
     fetchSegments();
+    fetchKnowledgeGraph();
     setActiveSegmentId(null);
     setActiveSegment(null);
   }, [courseId, weekNumber]);
@@ -79,6 +84,8 @@ export default function CourseWeekPage({ params }) {
         const doneJobs = results.filter(r => r.status === 'done');
         if (doneJobs.length > 0) {
           fetchSegments();
+          fetchKnowledgeGraph();    // also refresh KG after processing is done!
+          // Remove finished jobs from the list
           setProcessingFiles(prev =>
             prev.filter(f => !doneJobs.some(done => done.processingId === f.processingId))
           );
@@ -111,6 +118,14 @@ export default function CourseWeekPage({ params }) {
       });
   }
 
+  // Fetch KG for this course/week (used for auto-refresh after processing, can be passed down as needed)
+  function fetchKnowledgeGraph() {
+    fetch(`${BACKEND_URL}/api/knowledge-graph/?course_id=${courseId}&week=${weekNumber}`)
+      .then(res => res.json())
+      .then(data => setKnowledgeGraph(data))
+      .catch(() => setKnowledgeGraph({ nodes: [], edges: [] }));
+  }
+  
   // On segment list click
   const handleClickSegment = id => {
     setActiveSegmentId(id);
@@ -190,6 +205,8 @@ export default function CourseWeekPage({ params }) {
           </div>
           <div className="flex-1">
             <SlideViewer segment={activeSegment} />
+            {/* Pass knowledgeGraph to SlideViewer if you want to display it directly */}
+            {/* <SlideViewer segment={activeSegment} knowledgeGraph={knowledgeGraph} /> */}
           </div>
         </div>
       </div>

@@ -115,6 +115,14 @@ class MCQPayload(BaseModel):
     segment_id: str
     content: str
 
+class KnowledgeGraph(Base):
+    __tablename__ = "knowledge_graph"
+    id = Column(String(36), primary_key=True, index=True)
+    course_id = Column(String(36), nullable=False)
+    week = Column(Integer, nullable=False)
+    node_data = Column(Text, nullable=False)
+    edge_data = Column(Text, nullable=False)
+
 # Add WebSocket connection manager
 class ConnectionManager:
     def __init__(self):
@@ -237,13 +245,13 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
             return
 
         llm = Gemini(model="models/gemini-2.5-flash")
-        kg_nodes, kg_edges = [], []
+        kg_nodes = []
+        kg_edges = []
         seg_count = 0
 
         for idx, seg in enumerate(segments):
             text = seg["text"]
-
-            # Extract concepts
+            # --- Extract concepts as before ---
             concepts = []
             try:
                 prompt = (
@@ -267,18 +275,25 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
                 fallback_concept = clean_title(first_line)
                 concepts = [fallback_concept] if fallback_concept else [f"Slide {seg['slide_num']}"]
 
+            # ========== ADD ALL CONCEPTS TO KG NODES ==========
             for concept in concepts:
-                # Generate summary
+                # Give a unique ID using concept name and slide index
+                kg_nodes.append({
+                    "id": f"{idx}-{concept.replace(' ', '_')[:32]}",  # 32 char limit for sanity
+                    "label": concept,
+                    "segment_index": idx,
+                    "slide_num": seg.get("slide_num")
+                })
+                # (Optional: build edges here if relationships are known)
+
+                # --- generate summaries and save segments as before
                 try:
                     sum_prompt = (
                         f"In 2–3 sentences, explain the concept '{concept}' in the context of the following lecture slide."
                         f"\nSlide Text:\n{text[:1200]}"
                     )
                     summary = str(llm.complete(sum_prompt))
-                    print(f"[DEBUG SUMMARY] Concept: {concept}")
-                    print(f"[DEBUG SUMMARY] Generated: {summary[:100]}...")
                 except Exception as e:
-                    print(f"[DEBUG SUMMARY ERROR] Failed for concept '{concept}': {e}")
                     summary = ""
 
                 seg_db = Segment(
@@ -288,7 +303,6 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
                     summary=summary,
                 )
                 db.add(seg_db)
-                print(f"[DEBUG] Saved segment: title={concept!r} idx={idx}, summary_preview={summary[:30]!r}")
                 seg_count += 1
 
             percent = int(((idx + 1) / total_steps) * 100)
@@ -298,14 +312,12 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
             })
             db.commit()
 
-        print(f"[INFO] Total segments (concepts) created: {seg_count}")
+        print(f"[INFO] Total KG nodes created: {len(kg_nodes)}")
 
-        # Final commit
-        db.commit()
-        
-        # Save KG
+        # === FINAL: Save KG ===
         try:
-            unique_nodes = {n['id']: n for n in kg_nodes if 'id' in n}.values() if kg_nodes else []
+            # Remove duplicate nodes by (id)
+            unique_nodes = list({n['id']: n for n in kg_nodes if 'id' in n}.values())
             unique_edges = [
                 dict(t) for t in {tuple(sorted(e.items())) for e in kg_edges if isinstance(e, dict)}
             ] if kg_edges else []
@@ -317,25 +329,24 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
                     "id": str(uuid.uuid4()),
                     "course_id": course_id,
                     "week": week,
-                    "node_data": json.dumps(list(unique_nodes)),
-                    "edge_data": json.dumps(list(unique_edges)),
+                    "node_data": json.dumps(unique_nodes),
+                    "edge_data": json.dumps(unique_edges),
                 }
             )
             db.commit()
         except Exception as ex:
             print(f"[KG SAVE ERROR]: {ex}")
             db.rollback()
-        
-        # Mark as done
+
         db.query(LectureProcessing).filter(LectureProcessing.id == processing_id).update({
             "status": "done",
             "progress": 100,
             "error_message": None
         })
         db.commit()
-        
+
         print(f"[PROCESSING COMPLETE] Course: {course_id}, Week: {week}, Segments: {seg_count}")
-        
+
     except Exception as e:
         print(f"[PROCESSING ERROR]: {str(e)}")
         db.query(LectureProcessing).filter(LectureProcessing.id == processing_id).update({
@@ -348,60 +359,44 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
         db.close()
 
 
+
 def extract_mcqs_from_response(resp):
     """
-    Attempt to extract MCQ list from the LLM output, whether JSON or plain text.
-    Returns a list of dicts with question/options/answer.
+    Handles LLM output: accepts string or list, safely strips code block fencing, parses JSON,
+    and recovers MCQs robustly.
     """
-    # Try to find the first {...} or [...] block (JSON) and parse it
-    # If not, fall back to regex or bullet/numbered parsing
-    try:
-        # If LLM returns a codeblock: ``````
-        match = re.search(r'``````', resp, re.DOTALL)
-        text = match.group(1) if match else resp
+    # 1. If resp is already parsed (list or dict), return MCQs
+    if isinstance(resp, list):
+        return resp
+    if isinstance(resp, dict) and "mcqs" in resp:
+        return resp["mcqs"]
 
-        # Locate first { or [ for JSON fix
-        first_brace = text.find("{")
-        first_bracket = text.find("[")
-        if first_brace != -1 and (first_bracket == -1 or first_brace < first_bracket):
-            text = text[first_brace:]
-        elif first_bracket != -1:
-            text = text[first_bracket:]
+    # 2. If resp is a string, clean it up
+    if isinstance(resp, str):
+        text = resp.strip()
+        # Remove markdown code fence if present
+        if text.startswith("```"):
+            lines = text.splitlines()
+            # Remove opening ```, possibly with 'json'
+            if lines and lines[0].strip().startswith("```"):
+                lines = lines[1:]
+            # Remove closing ```
+            if lines and lines[-1].strip().startswith("```"):
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+        try:
+            items = json.loads(text)
+            if isinstance(items, dict) and "mcqs" in items:
+                return items["mcqs"]
+            if isinstance(items, list):
+                return items
+            return []
+        except Exception as e:
+            print("[MCQ PARSE ERROR]", e)
+            return []
+    print("[MCQ PARSE ERROR] Response is neither str nor list nor dict:", type(resp))
+    return []
 
-        # Fix potentially not-closed blocks
-        last_brace = text.rfind("}")
-        last_bracket = text.rfind("]")
-        if last_brace != -1:
-            text = text[:last_brace+1]
-        elif last_bracket != -1:
-            text = text[:last_bracket+1]
-
-        items = json.loads(text)
-        # Accept either an object with "mcqs" or a list of MCQs
-        if isinstance(items, dict) and "mcqs" in items:
-            return items["mcqs"]
-        if isinstance(items, list):
-            return items
-        return []
-    except Exception:
-        # Plaintext fallback: extract MCQ-like blocks (very basic)
-        lines = [l.strip() for l in resp.splitlines() if l.strip()]
-        out = []
-        q, opts = None, []
-        for line in lines:
-            if line.lower().startswith("question"):
-                if q and opts:
-                    out.append({"question": q, "options": opts, "answer": opts[0]})
-                q = line.split(":", 1)[-1].strip()
-                opts = []
-            elif re.match(r"^[a-dA-D]\.", line):
-                opts.append(line[2:].strip())
-            elif line.startswith("Answer:"):
-                ans = line.split(":", 1)[-1].strip()
-                if q and opts:
-                    out.append({"question": q, "options": opts, "answer": ans})
-                q, opts = None, []
-        return out
 
 
 # ==== LECTURE UPLOAD, PROCESSING, AND STATUS ====
@@ -472,11 +467,15 @@ async def get_segment_detail(segment_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Segment not found")
     return {
         "id": s.id,
+        "course_id": s.course_id,            # <-- add this
+        "week": s.week,                      # <-- add this
+        "segment_index": s.segment_index,    # <-- and this
         "title": s.title,
         "content": s.content,
         "summary": s.summary,
         "keywords": s.keywords
     }
+
 
 @app.get("/api/knowledge-graph/")
 async def get_kg(course_id: str, week: int, db: Session = Depends(get_db)):
@@ -492,11 +491,8 @@ async def get_kg(course_id: str, week: int, db: Session = Depends(get_db)):
 # ==== RETRIEVAL PRACTICE: MCQ GENERATION (basic stub) ====
 @app.post("/api/generate-mcqs/")
 async def generate_mcqs(payload: MCQReqModel = Body(...)):
-    """
-    Generate MCQs for a segment using Google Gemini.
-    """
     prompt = (
-        "Given the following lecture content, generate 3 multiple-choice questions (MCQs) with exactly 4 options each. "
+        "Given the following lecture content, generate several, relevant multiple-choice questions (MCQs) with exactly 4 options each. "
         "Include the correct answer for each as an 'answer' field. "
         "Respond ONLY in JSON as a list, e.g.:\n"
         "[{\"question\": \"...\", \"options\": [\"...\", \"...\", \"...\", \"...\"], \"answer\": \"...\"}, ...]\n"
@@ -504,12 +500,11 @@ async def generate_mcqs(payload: MCQReqModel = Body(...)):
     )
 
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")  # Or "gemini-pro" if that's what you use.
+        model = genai.GenerativeModel("gemini-1.5-flash")
         response = model.generate_content(prompt)
-        # Pull .text or .candidates etc, depending on sdk version
         model_output = str(getattr(response, "text", getattr(response, "candidates", response)))
+        print("[DEBUG] Gemini LLM Output:", model_output)   # <-- Always inside try
         mcqs = extract_mcqs_from_response(model_output)
-        # Post-process: ensure only questions with all fields
         out = []
         for item in mcqs:
             if isinstance(item, dict) and all(k in item for k in ("question", "options", "answer")) and len(item["options"]) == 4:
@@ -517,7 +512,7 @@ async def generate_mcqs(payload: MCQReqModel = Body(...)):
         return {"mcqs": out if out else [{"question": "LLM returned no MCQs.", "options": [], "answer": ""}]}
     except Exception as ex:
         print("[MCQ GENERATION ERROR]", ex)
-        # Fallback dummy
+        # Do NOT refer to model_output here!
         return {"mcqs": [{
             "question": "Sample fallback MCQ: LLM Error, please try again.",
             "options": ["A", "B", "C", "D"],
@@ -525,6 +520,57 @@ async def generate_mcqs(payload: MCQReqModel = Body(...)):
         }]}
 
 
+@app.post("/api/generate-mcqs-kg/")
+async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_db)):
+    """
+    Generate MCQs using Knowledge Graph nodes/edges context (RAG style).
+    Inputs: course_id, week, segment_id (OPTIONAL: content)
+    """
+    course_id = payload.get("course_id")
+    week = payload.get("week")
+    segment_id = payload.get("segment_id")
+
+    # Find the relevant knowledge graph for this course/week
+    kg_row = db.execute(
+        sql_text("SELECT node_data, edge_data FROM knowledge_graph WHERE course_id=:c AND week=:w"),
+        {"c": course_id, "w": week}
+    ).fetchone()
+    kg_nodes, kg_edges = [], []
+    if kg_row:
+        kg_nodes = json.loads(kg_row[0]) if kg_row[0] else []
+        kg_edges = json.loads(kg_row[1]) if kg_row[1] else []
+
+    # Optionally, filter nodes and edges related to the current segment/concept
+    # For first version, just use ALL KG context for the week
+
+    prompt = (
+        "Using the following concepts and relationships extracted from course material, "
+        "generate several relevant multiple-choice questions (MCQs) (4 options each, clearly indicate correct answer, avoid trick questions!). "
+        "Base the MCQs on both the concepts themselves and the direct relationships among them."
+        "\n\nRespond ONLY as a JSON list, e.g.:"
+        "\n[{\"question\": \"...\", \"options\": [\"A\", \"B\", \"C\", \"D\"], \"answer\": \"...\"}, ...]\n"
+        f"\nConcepts (nodes):\n{json.dumps(kg_nodes)[:1500]}"
+        f"\nRelationships (edges):\n{json.dumps(kg_edges)[:1500]}"
+    )
+    print("[DEBUG] MCQ RAW PROMPT:", prompt)  
+    try:
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        response = model.generate_content(prompt)
+        model_output = str(getattr(response, "text", getattr(response, "candidates", response)))
+        mcqs = extract_mcqs_from_response(model_output)
+        out = []
+        for item in mcqs:
+            if isinstance(item, dict) and all(k in item for k in ("question", "options", "answer")) and len(item["options"]) == 4:
+                out.append(item)
+        return {"mcqs": out if out else [{"question": "LLM returned no MCQs.", "options": [], "answer": ""}]}
+    except Exception as ex:
+        print("[MCQ KG GENERATION ERROR]", ex)
+        return {"mcqs": [{
+            "question": "Sample fallback MCQ: LLM Error, please try again.",
+            "options": ["A", "B", "C", "D"],
+            "answer": "A"
+        }]}
+    
 @app.get("/api/mcqs/")
 async def get_mcqs(segment_id: str, db: Session = Depends(get_db)):
     # Return MCQs for the segment
