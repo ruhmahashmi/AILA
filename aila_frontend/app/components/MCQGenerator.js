@@ -1,15 +1,20 @@
 // components/MCQGenerator.js
 import { useState } from "react";
 
-export default function MCQGenerator({ courseId, week, segmentIndex, segmentId, segmentContent }) {
+export default function MCQGenerator({
+  courseId,
+  week,
+  conceptId,
+  conceptSummary,
+  conceptContents,
+}) {
   const [mcqs, setMcqs] = useState([]);
   const [loading, setLoading] = useState(false);
   const [loadingKG, setLoadingKG] = useState(false);
   const [error, setError] = useState(null);
 
-  // --- DEBUG: ---
-  // Uncomment this below to debug prop flow.
-  // console.log("[MCQGenerator] courseId=", courseId, "week=", week, "segmentId=", segmentId);
+  // For debugging prop flow:
+  // console.log({ courseId, week, conceptId, conceptSummary, conceptContents });
 
   async function handleGenerateRaw() {
     setLoading(true);
@@ -17,10 +22,11 @@ export default function MCQGenerator({ courseId, week, segmentIndex, segmentId, 
     setMcqs([]);
     try {
       const body = {
-        course_id: String(courseId),
-        week: Number(week),
-        segment_index: Number(segmentIndex),
-        content: segmentContent ?? "",
+        course_id: courseId,
+        week: week,
+        concept_id: conceptId,
+        summary: conceptSummary ?? "",
+        contents: conceptContents ?? ""
       };
       const res = await fetch("http://localhost:8000/api/generate-mcqs/", {
         method: "POST",
@@ -44,7 +50,7 @@ export default function MCQGenerator({ courseId, week, segmentIndex, segmentId, 
       const body = {
         course_id: String(courseId),
         week: Number(week),
-        segment_id: segmentId,
+        concept_id: conceptId    // Note! Use concept_id for KG too
       };
       const res = await fetch("http://localhost:8000/api/generate-mcqs-kg/", {
         method: "POST",

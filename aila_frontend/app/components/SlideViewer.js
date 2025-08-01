@@ -53,9 +53,9 @@ export default function SlideViewer({ concept, courseId, week }) {
       <MCQGenerator
         courseId={courseId}
         week={week}
-        segmentIndex={segmentIndex}
-        segmentId={concept.id}
-        segmentContent={concept.contents}
+        conceptId={concept.id}
+        conceptSummary={concept.summary}
+        conceptContents={concept.contents}
       />
     </div>
   );

@@ -109,8 +109,9 @@ class MCQ(Base):
 class MCQReqModel(BaseModel):
     course_id: str
     week: int
-    segment_index: int
-    content: str
+    concept_id: str
+    summary: str = ""
+    contents: str = ""
 
 class MCQPayload(BaseModel):
     segment_id: str
@@ -123,6 +124,13 @@ class KnowledgeGraph(Base):
     week = Column(Integer, nullable=False)
     node_data = Column(Text, nullable=False)
     edge_data = Column(Text, nullable=False)
+
+class MCQConceptModel(BaseModel):
+    course_id: str
+    week: int
+    concept_id: str
+    summary: str = ""
+    contents: str = ""
 
 # Add WebSocket connection manager
 class ConnectionManager:
@@ -499,26 +507,31 @@ async def get_kg(course_id: str, week: int, db: Session = Depends(get_db)):
 
 # ==== RETRIEVAL PRACTICE: MCQ GENERATION (basic stub) ====
 @app.post("/api/generate-mcqs/")
-async def generate_mcqs(payload: MCQReqModel = Body(...)):
+async def generate_mcqs(payload: MCQConceptModel = Body(...)):
+    # Compose a targeted LLM prompt
     prompt = (
-        "Given the following lecture content, generate several, relevant multiple-choice questions (MCQs) with exactly 4 options each. "
-        "Include the correct answer for each as an 'answer' field. "
-        "Respond ONLY in JSON as a list, e.g.:\n"
-        "[{\"question\": \"...\", \"options\": [\"...\", \"...\", \"...\", \"...\"], \"answer\": \"...\"}, ...]\n"
-        f"\nLecture Content:\n{payload.content[:1800]}"
+        f"You are a teaching assistant. Create several relevant multiple-choice questions about the concept '{payload.concept_id}' "
+        "based only on its context in the following lecture notes. Use the summary for focus and the detailed contents for depth. "
+        "Make sure all questions focus specifically on this concept as covered in the summary/content below. "
+        "The number of questions should depend on its importance and how much material is present. "
+        "Respond ONLY as a JSON list in the format:"
+        '[{"question": "...", "options": ["A", "B", "C", "D"], "answer": "..."}]\n'
+        f"\nConcept summary:\n{payload.summary[:600]}"
+        f"\n\nRelated contents (for MCQ details):\n{payload.contents[:1200]}"
     )
-
     try:
         model = genai.GenerativeModel("gemini-1.5-flash")
         response = model.generate_content(prompt)
         model_output = str(getattr(response, "text", getattr(response, "candidates", response)))
-        print("[DEBUG] Gemini LLM Output:", model_output)   # <-- Always inside try
         mcqs = extract_mcqs_from_response(model_output)
         out = []
         for item in mcqs:
             if isinstance(item, dict) and all(k in item for k in ("question", "options", "answer")) and len(item["options"]) == 4:
                 out.append(item)
-        return {"mcqs": out if out else [{"question": "LLM returned no MCQs.", "options": [], "answer": ""}]}
+        return {"mcqs": out if out else [{"question": f"No MCQs found for concept '{payload.concept_id}'.", "options": [], "answer": ""}]}
+    except Exception as ex:
+        print("[MCQ GENERATION ERROR]", ex)
+        return {"mcqs": [{"question": "Sample fallback MCQ: LLM Error, please try again.", "options": ["A", "B", "C", "D"], "answer": "A"}]}
     except Exception as ex:
         print("[MCQ GENERATION ERROR]", ex)
         # Do NOT refer to model_output here!
@@ -531,19 +544,10 @@ async def generate_mcqs(payload: MCQReqModel = Body(...)):
 
 @app.post("/api/generate-mcqs-kg/")
 async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_db)):
-    """
-    Generate MCQs using Knowledge Graph nodes/edges context (RAG style).
-    Inputs: course_id, week, segment_id (OPTIONAL: content)
-    """
-    print(f"[DEBUG] MCQ_KG payload: {payload!r}")
     course_id = payload.get("course_id")
     week = payload.get("week")
-    print(f"[DEBUG] Fetching KG for course_id={course_id!r}, week={week!r}")
-    course_id = payload.get("course_id")
-    week = payload.get("week")
-    segment_id = payload.get("segment_id")
+    concept_id = payload.get("concept_id") or payload.get("segment_id")
 
-    # Find the relevant knowledge graph for this course/week
     kg_row = db.execute(
         sql_text("SELECT node_data, edge_data FROM knowledge_graph WHERE course_id=:c AND week=:w"),
         {"c": course_id, "w": week}
@@ -553,19 +557,24 @@ async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_
         kg_nodes = json.loads(kg_row[0]) if kg_row[0] else []
         kg_edges = json.loads(kg_row[1]) if kg_row[1] else []
 
-    # Optionally, filter nodes and edges related to the current segment/concept
-    # For first version, just use ALL KG context for the week
+    # Find the selected node, if any
+    selected_node = next((n for n in kg_nodes if n["id"] == concept_id), None)
+    selected_summary = selected_node.get("summary", "") if selected_node else ""
+    selected_contents = selected_node.get("contents", "") if selected_node else ""
 
     prompt = (
-        "Using the following concepts and relationships extracted from course material, "
-        "generate several relevant multiple-choice questions (MCQs) (4 options each, clearly indicate correct answer, avoid trick questions!). "
-        "Base the MCQs on both the concepts themselves and the direct relationships among them."
-        "\n\nRespond ONLY as a JSON list, e.g.:"
-        "\n[{\"question\": \"...\", \"options\": [\"A\", \"B\", \"C\", \"D\"], \"answer\": \"...\"}, ...]\n"
-        f"\nConcepts (nodes):\n{json.dumps(kg_nodes)[:1500]}"
-        f"\nRelationships (edges):\n{json.dumps(kg_edges)[:1500]}"
+        f"As a teaching assistant, generate several relevant and varied multiple-choice questions (MCQs) focused on the concept '{concept_id}' "
+        "as it appears in this week's knowledge graph. Use the summary and content of that concept for focus. "
+        "Also use its direct relationships to other concepts in the KG to create integrative questions that require understanding context and relationships. "
+        "The number of questions should reflect the importance and coverage of the concept. "
+        "Respond ONLY as a JSON list, e.g.:\n"
+        '[{"question": "...", "options": ["A", "B", "C", "D"], "answer": "..."}]\n'
+        f"\nConcept summary:\n{selected_summary[:600]}"
+        f"\n\nConcept detail/context:\n{selected_contents[:1200]}"
+        f"\n\nKnowledge Graph Concepts:\n{json.dumps(kg_nodes)[:1200]}"
+        f"\nRelations:\n{json.dumps(kg_edges)[:400]}"
     )
-    print("[DEBUG] MCQ RAW PROMPT:", prompt)  
+    print("[DEBUG] MCQ KG Concept Prompt:", prompt)
     try:
         model = genai.GenerativeModel("gemini-1.5-flash")
         response = model.generate_content(prompt)
@@ -575,14 +584,10 @@ async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_
         for item in mcqs:
             if isinstance(item, dict) and all(k in item for k in ("question", "options", "answer")) and len(item["options"]) == 4:
                 out.append(item)
-        return {"mcqs": out if out else [{"question": "LLM returned no MCQs.", "options": [], "answer": ""}]}
+        return {"mcqs": out if out else [{"question": f"No MCQs found for concept '{concept_id}' in KG.", "options": [], "answer": ""}]}
     except Exception as ex:
         print("[MCQ KG GENERATION ERROR]", ex)
-        return {"mcqs": [{
-            "question": "Sample fallback MCQ: LLM Error, please try again.",
-            "options": ["A", "B", "C", "D"],
-            "answer": "A"
-        }]}
+        return {"mcqs": [{"question": "Sample fallback MCQ: LLM Error, please try again.", "options": ["A", "B", "C", "D"], "answer": "A"}]}
     
 @app.get("/api/mcqs/")
 async def get_mcqs(segment_id: str, db: Session = Depends(get_db)):
