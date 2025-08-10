@@ -334,33 +334,65 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
         for node in kg_nodes:
             print(f" - {node['label']}: found on slides {node['slide_nums']} ({node['count']} times)")
 
-        db.execute(
-            sql_text("DELETE FROM knowledge_graph WHERE course_id=:course_id AND week=:week"),
+        # ---- AGGREGATE EXISTING KNOWLEDGE GRAPH NODES ----
+        kg_row = db.execute(
+            sql_text("SELECT node_data, edge_data, id FROM knowledge_graph WHERE course_id=:course_id AND week=:week"),
             {"course_id": course_id, "week": week}
-        )
-        db.commit()
-        db.execute(
-            sql_text(
-                "INSERT INTO knowledge_graph "
-                "(id, course_id, week, node_data, edge_data) VALUES "
-                "(:id, :course_id, :week, :node_data, :edge_data)"
-            ),
-            {
-                "id": str(uuid.uuid4()),
-                "course_id": course_id,
-                "week": week,
-                "node_data": json.dumps(kg_nodes),
-                "edge_data": json.dumps([]),
-            }
-        )
+        ).fetchone()
+
+        existing_nodes = []
+        existing_edges = []
+
+        if kg_row:
+            existing_nodes = json.loads(kg_row[0]) if kg_row[0] else []
+            existing_edges = json.loads(kg_row[1]) if kg_row[1] else []
+            kg_db_id = kg_row[2]
+        else:
+            kg_db_id = str(uuid.uuid4())
+
+        # Deduplicate by concept ID
+        def dedup_concepts(all_nodes):
+            seen = {}
+            for node in all_nodes:
+                cid = node["id"]
+                if cid in seen:
+                    # Merge fields if needed (here, just append slide nums/indices, combine summaries, etc.)
+                    seen[cid]["slide_indices"] += node.get("slide_indices", [])
+                    seen[cid]["slide_nums"] += node.get("slide_nums", [])
+                    if node.get("summary"):
+                        seen[cid]["summary"] += "\n" + node["summary"]
+                    if node.get("contents"):
+                        seen[cid]["contents"] += "\n" + node["contents"]
+                    seen[cid]["count"] += node.get("count", 0)
+                else:
+                    seen[cid] = node
+            return list(seen.values())
+
+        all_nodes = dedup_concepts(existing_nodes + kg_nodes)
+
+        if kg_row:
+            # If exists, update
+            db.execute(
+                sql_text("UPDATE knowledge_graph SET node_data=:node_data, edge_data=:edge_data WHERE id=:kgid"),
+                {"node_data": json.dumps(all_nodes), "edge_data": json.dumps(existing_edges), "kgid": kg_db_id}
+            )
+        else:
+            db.execute(
+                sql_text(
+                    "INSERT INTO knowledge_graph "
+                    "(id, course_id, week, node_data, edge_data) VALUES "
+                    "(:id, :course_id, :week, :node_data, :edge_data)"
+                ),
+                {
+                    "id": kg_db_id,
+                    "course_id": course_id,
+                    "week": week,
+                    "node_data": json.dumps(all_nodes),
+                    "edge_data": json.dumps(existing_edges),
+                }
+            )
         db.commit()
 
-        db.query(LectureProcessing).filter(LectureProcessing.id == processing_id).update({
-            "status": "done",
-            "progress": 100,
-            "error_message": None
-        })
-        db.commit()
 
         print(f"[PROCESSING COMPLETE] Course: {course_id}, Week: {week}, Segments: {seg_count}")
 
@@ -514,6 +546,7 @@ async def generate_mcqs(payload: MCQConceptModel = Body(...)):
         "based only on its context in the following lecture notes. Use the summary for focus and the detailed contents for depth. "
         "Make sure all questions focus specifically on this concept as covered in the summary/content below. "
         "The number of questions should depend on its importance and how much material is present. "
+        "Make sure EACH QUESTION is accompanied by exactly 4 numbered options, and provide the correct answer as an 'answer' field (the text matching one of the options, not the letter/number). "
         "Respond ONLY as a JSON list in the format:"
         '[{"question": "...", "options": ["A", "B", "C", "D"], "answer": "..."}]\n'
         f"\nConcept summary:\n{payload.summary[:600]}"
@@ -567,6 +600,7 @@ async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_
         "as it appears in this week's knowledge graph. Use the summary and content of that concept for focus. "
         "Also use its direct relationships to other concepts in the KG to create integrative questions that require understanding context and relationships. "
         "The number of questions should reflect the importance and coverage of the concept. "
+        "For each MCQ, ALWAYS include an 'answer' key, as the correct text exactly matching one of the options (not a letter or index)."
         "Respond ONLY as a JSON list, e.g.:\n"
         '[{"question": "...", "options": ["A", "B", "C", "D"], "answer": "..."}]\n'
         f"\nConcept summary:\n{selected_summary[:600]}"
