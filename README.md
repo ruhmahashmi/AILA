@@ -19,7 +19,7 @@ AILA (AI-powered Intelligent Lecturing Assistant) is a research system that supp
 ## Getting Started
 
 ### Backend
-See `aila_backend/README.md` for frontend setup instructions.
+See `aila_backend/README.md` for backend setup instructions.
 
 1. `cd aila_backend`
 2. `pip install -r requirements.txt`
