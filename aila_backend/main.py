@@ -55,6 +55,13 @@ class User(Base):
     password = Column(String(255), nullable=False)
     role = Column(String(50), nullable=False)
 
+class Enrollment(Base):
+    __tablename__ = "enrollments"
+    id = Column(String(36), primary_key=True, index=True)
+    course_id = Column(String(36), ForeignKey("courses.id"))
+    student_id = Column(String(36), ForeignKey("users.id"))
+    enrolled_at = Column(DateTime(timezone=True), server_default=func.now())
+
 class Course(Base):
     __tablename__ = "courses"
     id = Column(String(36), primary_key=True, index=True)
@@ -131,6 +138,8 @@ class MCQConceptModel(BaseModel):
     concept_id: str
     summary: str = ""
     contents: str = ""
+
+Base.metadata.create_all(bind=engine)
 
 # Add WebSocket connection manager
 class ConnectionManager:
@@ -553,7 +562,7 @@ async def generate_mcqs(payload: MCQConceptModel = Body(...)):
         f"\n\nRelated contents (for MCQ details):\n{payload.contents[:1200]}"
     )
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = genai.GenerativeModel("models/gemini-2.5-flash")
         response = model.generate_content(prompt)
         model_output = str(getattr(response, "text", getattr(response, "candidates", response)))
         mcqs = extract_mcqs_from_response(model_output)
@@ -610,7 +619,7 @@ async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_
     )
     print("[DEBUG] MCQ KG Concept Prompt:", prompt)
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = genai.GenerativeModel("models/gemini-2.5-flash")
         response = model.generate_content(prompt)
         model_output = str(getattr(response, "text", getattr(response, "candidates", response)))
         mcqs = extract_mcqs_from_response(model_output)
