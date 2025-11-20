@@ -4,10 +4,13 @@ import os
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, Body
 from fastapi import WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, Depends, HTTPException, Form
+from sqlalchemy.orm import Session
 from sqlalchemy import Column, Integer, String, DateTime, create_engine, ForeignKey, Text, JSON, text as sql_text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
 from sqlalchemy.sql import func
+from sqlalchemy import Boolean, ARRAY
 from sqlalchemy import text as sql_text
 from pydantic import BaseModel
 from pptx import Presentation
@@ -25,6 +28,7 @@ import google.generativeai as genai
 
 genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
 
+
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -33,12 +37,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# MYSQL_USER = os.environ.get("MYSQL_USER", "ailastaruser")
-# MYSQL_PASSWORD = os.environ.get("MYSQL_PASSWORD", "yourpassword")
-# MYSQL_HOST = os.environ.get("MYSQL_HOST", "localhost")
-# MYSQL_DB = os.environ.get("MYSQL_DB", "ailastar")
-# DATABASE_URL = f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}/{MYSQL_DB}"
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///ailastar.db")
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {})
@@ -138,6 +136,35 @@ class MCQConceptModel(BaseModel):
     concept_id: str
     summary: str = ""
     contents: str = ""
+
+class Quiz(Base):
+    __tablename__ = "quizzes"
+    id = Column(String(36), primary_key=True, index=True)
+    name = Column(String(255), nullable=False)
+    course_id = Column(String(36), ForeignKey("courses.id"))
+    week = Column(Integer, nullable=False)
+    concept_ids = Column(JSON, nullable=False)  # List of KG node IDs or segment IDs
+    instructor_id = Column(String(36), ForeignKey("users.id"))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class QuizAttempt(Base):
+    __tablename__ = "quiz_attempts"
+    id = Column(String(36), primary_key=True, index=True)
+    quiz_id = Column(String, ForeignKey('quizzes.id'))
+    student_id = Column(String(36), ForeignKey("users.id"))
+    started_at = Column(DateTime(timezone=True), server_default=func.now())
+    last_activity = Column(DateTime(timezone=True), onupdate=func.now())
+    responses = Column(JSON, default=dict)  # {mcq_id: {"answer": ..., "correct": ...}}
+
+class MCQResponse(Base):
+    __tablename__ = "mcq_responses"
+    id = Column(String(36), primary_key=True, index=True)
+    attempt_id = Column(String(36), ForeignKey("quiz_attempts.id"))
+    mcq_id = Column(String(36), ForeignKey("mcqs.id"))
+    question = Column(Text, nullable=False)
+    selected = Column(String(255), nullable=True)
+    correct = Column(Boolean, default=False)
+    answered_at = Column(DateTime(timezone=True), server_default=func.now())
 
 Base.metadata.create_all(bind=engine)
 
@@ -779,6 +806,213 @@ async def websocket_endpoint(websocket: WebSocket, course_id: str, week: int):
     except WebSocketDisconnect:
         manager.disconnect(websocket)
 
+# --- 1. Create a quiz (Instructor) ---
+@app.post("/api/quiz/create")
+async def create_quiz(
+    name: str = Form(...),
+    course_id: str = Form(...),
+    week: int = Form(...),
+    concept_ids: str = Form(...),  # Can be JSON or comma-separated
+    instructor_id: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    """Create a quiz for a course, week, and concepts."""
+    try:
+        concepts = json.loads(concept_ids)
+    except Exception:
+        concepts = [s.strip() for s in concept_ids.split(",") if s.strip()]
+    quiz = Quiz(
+        id=str(uuid.uuid4()),
+        name=name,
+        course_id=course_id,
+        week=week,
+        concept_ids=concepts,
+        instructor_id=instructor_id
+    )
+    db.add(quiz)
+    db.commit()
+    db.refresh(quiz)
+    return {
+        "quiz": {
+            "id": quiz.id,
+            "name": quiz.name,
+            "course_id": quiz.course_id,
+            "week": quiz.week,
+            "concept_ids": quiz.concept_ids
+        }
+    }
+
+# --- 2. List all quizzes for a course/week (for student or dashboard) ---
+@app.get("/api/quiz/list")
+async def list_quizzes(course_id: str, week: int, db: Session = Depends(get_db)):
+    quizzes = db.query(Quiz).filter_by(course_id=course_id, week=week).all()
+    return [
+        {"id": q.id, "name": q.name, "concept_ids": q.concept_ids}
+        for q in quizzes
+    ]
+
+# --- 3. Start or resume a quiz attempt (one per student per quiz) ---
+@app.post("/api/quiz/attempt/start")
+async def start_quiz_attempt(
+    quiz_id: str = Form(...),
+    student_id: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    """Start or resume a quiz attempt for a student."""
+    attempt = db.query(QuizAttempt).filter_by(quiz_id=quiz_id, student_id=student_id).first()
+    if attempt:
+        return {"attempt_id": attempt.id, "resume": True}
+
+    new_attempt = QuizAttempt(
+        id=str(uuid.uuid4()),
+        quiz_id=quiz_id,
+        student_id=student_id,
+        responses={}
+    )
+    db.add(new_attempt)
+    db.commit()
+    db.refresh(new_attempt)
+    return {"attempt_id": new_attempt.id, "resume": False}
+
+# --- 4. Fetch next adaptive MCQ (students; Gemini/KG) ---
+@app.get("/api/quiz/attempt/next")
+async def get_next_mcq_gemini(attempt_id: str, db: Session = Depends(get_db)):
+    """Get the next MCQ for a student's quiz attempt, using Gemini LLM."""
+    attempt = db.query(QuizAttempt).filter_by(id=attempt_id).first()
+    if not attempt:
+        raise HTTPException(status_code=404, detail="Attempt not found")
+
+    quiz = db.query(Quiz).filter_by(id=getattr(attempt, 'quizid', getattr(attempt, 'quiz_id', None))).first()
+    if not quiz:
+        raise HTTPException(status_code=404, detail="Quiz not found")
+
+    # Robustly handle CSV/JSON for concept_ids
+    conceptids = quiz.concept_ids if hasattr(quiz, 'concept_ids') else []
+    if isinstance(conceptids, str):
+        try:
+            conceptids = json.loads(conceptids)
+        except Exception:
+            conceptids = [s.strip() for s in conceptids.split(",") if s.strip()]
+    if not isinstance(conceptids, list):
+        conceptids = list(conceptids)
+
+    given_mcqs = set(attempt.responses.keys()) if attempt.responses else set()
+
+    for conceptid in conceptids:
+        kg_row = db.execute(
+            sql_text("SELECT node_data, edge_data FROM knowledge_graph WHERE course_id=:c AND week=:w"),
+            {"c": quiz.course_id, "w": quiz.week}
+        ).fetchone()
+        kg_nodes = json.loads(kg_row[0]) if (kg_row and kg_row[0]) else []
+
+        selected_node = next((n for n in kg_nodes if n["id"] == conceptid), None)
+        if not selected_node:
+            continue
+
+        payload = {
+            "course_id": quiz.course_id,
+            "week": quiz.week,
+            "concept_id": conceptid,
+        }
+        resp = await generate_mcqs_kg(payload, db)
+        mcqs = resp.get("mcqs", [])
+
+        for mcq in mcqs:
+            mcq_id = f"gemini-{conceptid}-{hash(mcq['question'])}"
+            if mcq_id not in given_mcqs:
+                return {
+                    "mcq_id": mcq_id,
+                    "question": mcq["question"],
+                    "options": mcq["options"],
+                    "answer": mcq["answer"],  # Only supply if practicing, not for graded quiz
+                }
+    return {"done": True}
+
+# --- 5. Submit MCQ answer for attempt (DB or Gemini MCQ) ---
+@app.post("/api/quiz/attempt/submit")
+async def submit_mcq_answer(
+    attempt_id: str = Form(...),
+    mcq_id: str = Form(...),
+    selected: str = Form(...),
+    answer: str = Form(None),  # Only required for Gemini MCQs
+    db: Session = Depends(get_db)
+):
+    attempt = db.query(QuizAttempt).filter_by(id=attempt_id).first()
+    if not attempt:
+        raise HTTPException(status_code=404, detail="Attempt not found")
+    mcq = db.query(MCQ).filter_by(id=mcq_id).first()
+
+    if mcq is not None:
+        correct = (selected.strip() == mcq.answer.strip())
+        answer_val = mcq.answer
+        question = mcq.question
+    elif answer is not None:
+        correct = (selected.strip() == answer.strip())
+        answer_val = answer
+        question = "(Generated MCQ)"
+    else:
+        raise HTTPException(status_code=400, detail="No answer key for this MCQ")
+
+    responses = attempt.responses or {}
+    responses[mcq_id] = {"selected": selected, "correct": correct}
+    attempt.responses = responses
+    db.commit()
+
+    mcq_resp = MCQResponse(
+        id=str(uuid.uuid4()),
+        attempt_id=attempt_id,
+        mcq_id=mcq_id,
+        question=question,
+        selected=selected,
+        correct=correct
+    )
+    db.add(mcq_resp)
+    db.commit()
+
+    return {"correct": correct, "answer": answer_val}
+
+# --- 6. Get summary of quiz attempt ---
+@app.get("/api/quiz/attempt/state")
+async def quiz_attempt_state(attempt_id: str, db: Session = Depends(get_db)):
+    """Return a summary (attempted/correct count, responses) for an attempt."""
+    attempt = db.query(QuizAttempt).filter_by(id=attempt_id).first()
+    if not attempt:
+        raise HTTPException(status_code=404, detail="Attempt not found")
+    responses = attempt.responses or {}
+    return {
+        "attempted": len(responses),
+        "correct": sum(1 for r in responses.values() if r.get("correct")),
+        "responses": responses
+    }
+
+# --- 7. Quiz aggregate stats (by instructor) ---
+@app.get("/api/quiz/stats")
+async def quiz_stats(quiz_id: str, db: Session = Depends(get_db)):
+    """Aggregate stats for a quiz."""
+    attempts = db.query(QuizAttempt).filter_by(quiz_id=quiz_id).all()
+    summary = []
+    for att in attempts:
+        responses = att.responses or {}
+        summary.append({
+            "attempted": len(responses),
+            "correct": sum(1 for v in responses.values() if v.get("correct"))
+        })
+    return {"total_attempts": len(attempts), "stats": summary}
+
+# --- 8. Home/root route ---
 @app.get("/")
 async def root():
     return {"message": "AILA Backend (SQLite) is running"}
+
+# --- 9. Delete upload/file endpoint (optional housekeeping) ---
+@app.post("/api/delete-upload")
+async def delete_upload(uploadid: str = Form(...), db: Session = Depends(get_db)):
+    """Delete a previously uploaded lecture file."""
+    upload = db.query(LectureUpload).filter(LectureUpload.id == uploadid).first()
+    if not upload:
+        raise HTTPException(status_code=404, detail="File not found")
+    if upload.fileurl and os.path.exists(upload.fileurl):
+        os.remove(upload.fileurl)
+    db.delete(upload)
+    db.commit()
+    return {"status": "deleted"}

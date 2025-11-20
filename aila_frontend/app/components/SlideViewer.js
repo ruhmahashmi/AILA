@@ -1,7 +1,6 @@
 // components/SlideViewer.js
 'use client';
-
-import MCQGenerator from "./MCQGenerator"; // Adjust path if needed
+import MCQGenerator from "./MCQGenerator"; // Adjust the path as needed
 
 export default function SlideViewer({ concept, courseId, week }) {
   if (!concept) {
@@ -12,7 +11,6 @@ export default function SlideViewer({ concept, courseId, week }) {
     );
   }
 
-  // Use parent-passed courseId/week, NOT from the concept node!
   const segmentIndex = concept.slide_indices?.[0] ?? 0;
 
   return (
@@ -49,7 +47,6 @@ export default function SlideViewer({ concept, courseId, week }) {
           }}>{concept.contents || ""}</pre>
         </details>
       </div>
-      {/* --- FIX: pass courseId and week as received from parent --- */}
       <MCQGenerator
         courseId={courseId}
         week={week}
