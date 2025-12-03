@@ -1,11 +1,20 @@
+# Node / Next.js
 node_modules/
+.next/
 .env
 .env.local
-.next/
+
+# macOS / OS
 .DS_Store
+
+# Logs
 *.log
+
+# Python
 *.pyc
 __pycache__/
+.venv/
+
+# App data
 ailastar.db
 uploads/
-.venv/

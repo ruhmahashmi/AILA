@@ -9,3 +9,4 @@ __pycache__/
 ailastar.db
 uploads/
 node_modules/
+.venv/

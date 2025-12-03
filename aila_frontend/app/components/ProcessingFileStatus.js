@@ -10,7 +10,7 @@ export default function ProcessingFileStatus({ processingId, fileName }) {
       <div><strong>{fileName}</strong></div>
       <div>Status: {status}</div>
       {error && <div style={{ color: "red" }}>Error: {error}</div>}
-      <ProgressBar percent={progress} />
+      <ProgressBar progress={progress} status={status} />
     </div>
   );
 }

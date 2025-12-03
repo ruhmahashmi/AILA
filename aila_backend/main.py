@@ -23,20 +23,14 @@ import uuid
 import shutil
 import json
 import re
+import logging
 import google.generativeai as genai
-
+from collections import deque
 
 genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
 
 
-app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///ailastar.db")
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {})
@@ -166,7 +160,33 @@ class MCQResponse(Base):
     correct = Column(Boolean, default=False)
     answered_at = Column(DateTime(timezone=True), server_default=func.now())
 
+class MethodFilter(logging.Filter):
+    def filter(self, record):
+        if record.args and len(record.args) >= 4:
+            method = record.args[1]  # GET, POST, etc.
+            status = str(record.args[3])  # status code
+            # Show POST/PUT/DELETE/PATCH + any errors (4xx/5xx)
+            if method in ("POST", "PUT", "DELETE", "PATCH"):
+                return True
+            if status.startswith(("4", "5")):
+                return True
+            return False
+        return False
+
 Base.metadata.create_all(bind=engine)
+
+app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+# Attach filter to Uvicorn access logger so only key lines show
+uvicorn_access_logger = logging.getLogger("uvicorn.access")
+uvicorn_access_logger.addFilter(MethodFilter())
+
 
 # Add WebSocket connection manager
 class ConnectionManager:
@@ -217,13 +237,13 @@ def is_good_keyword(word):
         return False
     if re.fullmatch(r'[\d\W]+', word):  # only numbers or punctuation
         return False
-    # Only remove truly generic stuff, and never 'stack', 'queue', etc.
-    BLACKLIST = set(['slide','slides','page','pages','chapter','section','untitled'])
+    BLACKLIST = set(['slide', 'slides', 'page', 'pages', 'chapter', 'section', 'untitled'])
+    BLACKLIST.update(KEYWORD_BLACKLIST)  # Merge for stricter check
     if word in BLACKLIST:
         return False
-    if len(word.split()) > 5:
+    if len(word.split()) > 4:  
         return False
-    if len(word) > 40:
+    if len(word) > 30:  
         return False
     return True
 
@@ -242,15 +262,30 @@ def clean_title(title):
     title_clean = re.sub(r'^[-:\s]+', '', title_clean)
     return title_clean.strip() or None
 
+def normalize_id(text):
+    """Make sure every concept has the EXACT same ID everywhere"""
+    return re.sub(r'\W+', '_', text.strip().lower()).strip('_')
+
 def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, processing_id):
     from llama_index.llms.gemini import Gemini
+    import json
+    import uuid
+    import os
+    import fitz
+    from pptx import Presentation
+    from collections import defaultdict
+    import re
+
     db = SessionLocal()
+    llm = Gemini(model="models/gemini-2.5-flash")  
+
     try:
         db.query(LectureProcessing).filter(LectureProcessing.id == processing_id).update({
             "status": "processing", "progress": 0, "error_message": None
         })
         db.commit()
-        
+
+        # ---------- 1. Extract segments ----------
         segments = []
         ext = os.path.splitext(filepath)[-1].lower()
         if ext == ".pdf":
@@ -258,191 +293,268 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
             for i, page in enumerate(doc):
                 text = page.get_text(sort=True)
                 if text.strip():
-                    segments.append({"slide_num": i+1, "text": text})
+                    segments.append({"slide_num": i + 1, "text": text})
         elif ext == ".pptx":
             prs = Presentation(filepath)
             for i, slide in enumerate(prs.slides):
-                lines = []
-                for shape in slide.shapes:
-                    if hasattr(shape, "text"):
-                        lines.append(shape.text)
+                lines = [shape.text for shape in slide.shapes if hasattr(shape, "text")]
                 content = "\n".join(lines)
                 if content.strip():
-                    segments.append({"slide_num": i+1, "text": content})
-        else:
-            db.query(LectureProcessing).filter(LectureProcessing.id == processing_id).update({
-                "status": "error",
-                "error_message": f"Unsupported file type: {filepath}"
-            })
-            db.commit()
-            db.close()
-            return
+                    segments.append({"slide_num": i + 1, "text": content})
+
+        if not segments:
+            raise ValueError("No readable slides found")
 
         total_steps = len(segments)
-        if total_steps == 0:
-            db.query(LectureProcessing).filter(LectureProcessing.id == processing_id).update({
-                "status": "error",
-                "progress": 0,
-                "error_message": f"No valid slides found in file: {file_name}"
-            })
-            db.commit()
-            db.close()
-            return
+        db.query(LectureProcessing).filter(LectureProcessing.id == processing_id).update({"progress": 10})
+        db.commit()
 
-        llm = Gemini(model="models/gemini-2.5-flash")
+        # ---------- 2. Extract concepts per slide ----------
         concept_info = defaultdict(lambda: {
-            "slide_indices": [],
-            "slide_nums": [],
-            "summaries": [],
-            "contents": [],
+            "slide_indices": [], "slide_nums": [], "summaries": [], "contents": []
         })
-        seg_count = 0
+
         for idx, seg in enumerate(segments):
             text = seg["text"]
-            concepts = []
             try:
                 prompt = (
-                    "From the following lecture slide text, extract 3 to 15 or more if possible, important key concepts or technical terms, max 3 to 5 words each. "
-                    "List each on its own line and don't repeat the concepts/terms. Do not include the words 'slide', 'page', numbers, or general words. "
-                    "For example, if a slide covers 'Hash Tables', 'Open Addressing', and 'Collisions', list each as its own concept.\n"
-                    f"Slide Text:\n{text[:1200]}"
+                    "Extract 5–20 important, specific technical concepts/terms from this lecture slide. "
+                    "Each concept should be 1–5 words. Avoid generic terms like 'example', 'diagram', 'summary'. "
+                    "Focus on core topics the instructor is teaching.\n\n"
+                    f"Slide {seg['slide_num']}:\n{text[:1500]}"
                 )
                 raw = str(llm.complete(prompt))
-                print(f"[LLM RAW CONCEPTS] Slide idx={idx} {raw}")
-                concept_candidates = [clean_title(re.sub(r'^[\*\-\d\.]+\s*', '', line).strip()) for line in raw.splitlines()]
-                concept_candidates = [c for c in concept_candidates if c]
-                concepts = [c for c in set(concept_candidates) if c and is_good_keyword(c)]
-                print(f"[FILTERED CONCEPTS] Slide idx={idx} {concepts}")
-            except Exception as e:
-                print(f"[Keyword concept extraction failed]: {e}")
-                concepts = []
+                print(f"[LLM RAW CONCEPTS] Slide {idx}: {raw}")
 
-            if not concepts:
-                first_line = text.split('\n', 1)[0].strip() if text.strip() else ""
-                fallback_concept = clean_title(first_line)
-                concepts = [fallback_concept] if fallback_concept else [f"Slide {seg.get('slide_num', idx)}"]
+                candidates = [
+                    clean_title(re.sub(r'^[\*\-\d\.\)]+\s*', '', line).strip())
+                    for line in raw.splitlines() if line.strip()
+                ]
+                concepts = [c for c in candidates if c and is_good_keyword(c) and len(c.split()) <= 5]
+
+                if not concepts and text.strip():
+                    fallback = clean_title(text.split("\n", 1)[0])
+                    if fallback and is_good_keyword(fallback):
+                        concepts = [fallback]
+
+            except Exception as e:
+                print(f"[Concept extraction error] {e}")
+                concepts = ["Unknown Concept"]
 
             for concept in concepts:
-                # Only aggregate, don't build kg_nodes yet!
-                concept_info[concept]["slide_indices"].append(idx)
-                concept_info[concept]["slide_nums"].append(seg.get("slide_num"))
-                concept_info[concept]["contents"].append(text)
+                info = concept_info[concept]
+                info["slide_indices"].append(idx)
+                info["slide_nums"].append(seg.get("slide_num"))
+                info["contents"].append(text[:1000])
                 try:
-                    sum_prompt = (
-                        f"In 2–3 sentences, explain the concept '{concept}' in the context of the following lecture slide."
-                        f"\nSlide Text:\n{text[:1200]}"
-                    )
+                    sum_prompt = f"In 1–2 sentences, explain '{concept}' as taught in this slide:\n{text[:1000]}"
                     summary = str(llm.complete(sum_prompt)).strip()
-                except Exception as e:
-                    summary = ""
-                concept_info[concept]["summaries"].append(summary)
+                    info["summaries"].append(summary)
+                except:
+                    info["summaries"].append("")
 
-                # (Optional: save per-segment for legacy view)
-                seg_db = Segment(
-                    id=str(uuid.uuid4()), upload_id=upload_id, course_id=course_id, week=week,
-                    segment_index=idx, title=concept, content=text,
-                    keywords=concept,
-                    summary=summary,
-                )
-                db.add(seg_db)
-                seg_count += 1
+            main_concept = concepts[0] if concepts else f"Slide {seg['slide_num']}"
+            seg_db = Segment(
+                id=str(uuid.uuid4()),
+                upload_id=upload_id,
+                course_id=course_id,
+                week=week,
+                segment_index=idx,
+                title=main_concept,
+                content=text,
+                keywords=", ".join(concepts),
+                summary=" | ".join(set(info["summaries"][-3:])) if info["summaries"] else ""
+            )
+            db.add(seg_db)
 
-            percent = int(((idx + 1) / total_steps) * 100)
-            db.query(LectureProcessing).filter(LectureProcessing.id == processing_id).update({
-                "progress": percent, "status": "processing"
-            })
+            percent = 10 + int((idx + 1) / total_steps * 70)
+            db.query(LectureProcessing).filter(LectureProcessing.id == processing_id).update({"progress": percent})
             db.commit()
 
-        # ---- FINAL: Only after all segments, create unique node PER CONCEPT ----
+        # ---------- 3. Build clean node list ----------
         kg_nodes = []
         for concept, info in concept_info.items():
             kg_nodes.append({
-                "id": concept.replace(" ", "_")[:48],
+                "id": normalize_id(concept),
                 "label": concept,
-                "slide_indices": info["slide_indices"],
-                "slide_nums": info["slide_nums"],
-                "summary": "\n\n".join(s for s in info["summaries"] if s).strip(),
-                "contents": "\n\n".join(c for c in info["contents"] if c)[:2000],
-                "count": len(info["slide_indices"])
+                "count": len(info["slide_indices"]),
+                "slide_nums": sorted(set(info["slide_nums"])),
+                "summary": " ".join(set(info["summaries"]))[:1000],
+                "contents": ""
             })
 
         print(f"[DEDUP KG] Final unique concepts: {len(kg_nodes)}")
-        for node in kg_nodes:
-            print(f" - {node['label']}: found on slides {node['slide_nums']} ({node['count']} times)")
 
-        # ---- AGGREGATE EXISTING KNOWLEDGE GRAPH NODES ----
-        kg_row = db.execute(
-            sql_text("SELECT node_data, edge_data, id FROM knowledge_graph WHERE course_id=:course_id AND week=:week"),
-            {"course_id": course_id, "week": week}
+        # ---------- 4. Generate CORRECT hierarchical edges (PARENT → CHILD) ----------
+        print("[GENERATING HIERARCHY] Asking Gemini for correct top-down hierarchy...")
+        concept_list = "\n".join([
+            f"- {n['label']} (mentioned {n['count']} times, slides {n['slide_nums']})"
+            for n in sorted(kg_nodes, key=lambda x: -x['count'])[:80]
+        ])
+
+        hierarchy_prompt = f"""
+You are an expert computer science professor building a knowledge graph for students.
+
+Here are the concepts extracted from the lecture:
+
+{concept_list}
+
+Create a clean, top-down hierarchy where:
+- General concepts are parents
+- Specific concepts are children
+- Direction is always PARENT → CHILD (e.g., "Queue" → "Priority Queue", not the reverse)
+- Use realistic relations like: "includes", "has type", "uses", "implemented with", "has operation"
+
+Return ONLY valid JSON in this exact format:
+{{
+  "edges": [
+    {{"source": "Data Structure", "target": "Queue", "relation": "includes"}},
+    {{"source": "Queue", "target": "Priority Queue", "relation": "has type"}},
+    {{"source": "Priority Queue", "target": "Heap", "relation": "implemented with"}}
+  ]
+}}
+
+Rules:
+- source = parent (more general)
+- target = child (more specific)
+- Only use concepts from the list above
+- No cycles
+- Prefer depth over width
+- Maximum 50 edges
+
+Return only the JSON.
+"""
+
+        try:
+            response = str(llm.complete(hierarchy_prompt))
+            print(f"[GEMINI HIERARCHY RAW]: {response}")
+
+            # Clean JSON from Gemini response
+            json_str = response.strip()
+            if json_str.startswith("```json"):
+                json_str = json_str[7:]
+            if json_str.endswith("```"):
+                json_str = json_str[:-3]
+            json_str = json_str.strip()
+
+            hierarchy_json = json.loads(json_str)
+            gemini_edges = hierarchy_json.get("edges", [])
+
+            # FINAL EDGES: Clean and normalize
+            new_edges = []
+            seen = set()
+            for e in gemini_edges:
+                src = str(e.get("source", "")).strip()
+                tgt = str(e.get("target", "")).strip()
+                rel = str(e.get("relation", "related to")).strip()
+
+                if not src or not tgt or src == tgt:
+                    continue
+
+                src_id = src.replace(" ", "_")[:50]
+                tgt_id = tgt.replace(" ", "_")[:50]
+
+                edge_key = (src_id, tgt_id)
+                if edge_key in seen:
+                    continue
+                seen.add(edge_key)
+
+                new_edges.append({
+                    "source": normalize_id(e["source"]),
+                    "target": normalize_id(e["target"]),
+                    "relation": rel
+                })
+
+            print(f"[HIERARCHY EDGES] Generated {len(new_edges)} correct parent→child edges")
+
+        except Exception as e:
+            print(f"[Hierarchy failed] {e}, using fallback")
+            new_edges = []  # or your old co-occurrence method
+
+        # ---------- 5. Save KG with CORRECT DIRECTION ----------
+        all_nodes = kg_nodes                     #  list of concept dicts
+        all_edges = new_edges                     # parent → child edges from Gemini
+
+        all_nodes = compute_levels(all_nodes, all_edges)
+
+        # Optional: give roots a much higher visual weight
+        for node in all_nodes:
+            if node.get("isRoot"):
+                node["count"] = (node.get("count", 0) or 0) + 20
+
+        existing = db.execute(
+            sql_text("SELECT node_data, edge_data, id FROM knowledge_graph WHERE course_id=:c AND week=:w"),
+            {"c": course_id, "w": week}
         ).fetchone()
 
-        existing_nodes = []
-        existing_edges = []
-
-        if kg_row:
-            existing_nodes = json.loads(kg_row[0]) if kg_row[0] else []
-            existing_edges = json.loads(kg_row[1]) if kg_row[1] else []
-            kg_db_id = kg_row[2]
-        else:
-            kg_db_id = str(uuid.uuid4())
-
-        # Deduplicate by concept ID
-        def dedup_concepts(all_nodes):
-            seen = {}
-            for node in all_nodes:
-                cid = node["id"]
-                if cid in seen:
-                    # Merge fields if needed (here, just append slide nums/indices, combine summaries, etc.)
-                    seen[cid]["slide_indices"] += node.get("slide_indices", [])
-                    seen[cid]["slide_nums"] += node.get("slide_nums", [])
-                    if node.get("summary"):
-                        seen[cid]["summary"] += "\n" + node["summary"]
-                    if node.get("contents"):
-                        seen[cid]["contents"] += "\n" + node["contents"]
-                    seen[cid]["count"] += node.get("count", 0)
-                else:
-                    seen[cid] = node
-            return list(seen.values())
-
-        all_nodes = dedup_concepts(existing_nodes + kg_nodes)
-
-        if kg_row:
-            # If exists, update
+        if existing:
+            existing_nodes = json.loads(existing[0]) if existing[0] else []
+            existing_edges = json.loads(existing[1]) if existing[1] else []
+            seen = {(e["source"], e["target"]) for e in existing_edges}
+            all_edges = existing_edges + [e for e in all_edges if (e["source"], e["target"]) not in seen]
+            kg_id = existing[2]
             db.execute(
-                sql_text("UPDATE knowledge_graph SET node_data=:node_data, edge_data=:edge_data WHERE id=:kgid"),
-                {"node_data": json.dumps(all_nodes), "edge_data": json.dumps(existing_edges), "kgid": kg_db_id}
+                sql_text("UPDATE knowledge_graph SET node_data=:n, edge_data=:e WHERE id=:id"),
+                {"n": json.dumps(all_nodes), "e": json.dumps(all_edges), "id": kg_id}
             )
         else:
+            kg_id = str(uuid.uuid4())
             db.execute(
-                sql_text(
-                    "INSERT INTO knowledge_graph "
-                    "(id, course_id, week, node_data, edge_data) VALUES "
-                    "(:id, :course_id, :week, :node_data, :edge_data)"
-                ),
-                {
-                    "id": kg_db_id,
-                    "course_id": course_id,
-                    "week": week,
-                    "node_data": json.dumps(all_nodes),
-                    "edge_data": json.dumps(existing_edges),
-                }
+                sql_text("""
+                    INSERT INTO knowledge_graph (id, course_id, week, node_data, edge_data)
+                    VALUES (:id, :c, :w, :n, :e)
+                """),
+                {"id": kg_id, "c": course_id, "w": week, "n": json.dumps(all_nodes), "e": json.dumps(all_edges)}
             )
+
         db.commit()
 
+        db.query(LectureProcessing).filter(LectureProcessing.id == processing_id).update({
+            "status": "done", "progress": 100
+        })
+        db.commit()
 
-        print(f"[PROCESSING COMPLETE] Course: {course_id}, Week: {week}, Segments: {seg_count}")
+        print(f"[PROCESSING COMPLETE] Course: {course_id}, Week: {week}")
+        print(f"   → {len(all_nodes)} concepts, {len(all_edges)} CORRECT hierarchical relations saved")
 
     except Exception as e:
-        print(f"[PROCESSING ERROR]: {str(e)}")
+        print(f"[FATAL ERROR] {str(e)}")
         db.query(LectureProcessing).filter(LectureProcessing.id == processing_id).update({
-            "status": "error",
-            "progress": 0,
-            "error_message": f"Fatal: {str(e)}"
+            "status": "error", "progress": 0, "error_message": str(e)[:500]
         })
         db.commit()
     finally:
         db.close()
 
+def compute_levels(nodes, edges):
+    node_map = {n["id"]: n for n in nodes}
+    incoming = defaultdict(int)
+    children = defaultdict(list)
+    for e in edges:
+        incoming[e["target"]] += 1
+        children[e["source"]].append(e["target"])
+    
+    # Roots = nodes with no incoming edges
+    roots = [nid for nid in node_map if incoming.get(nid, 0) == 0]
+    
+    level_map = {}
+    queue = deque([(root, 0) for root in roots])
+    
+    while queue:
+        node_id, level = queue.popleft()
+        level_map[node_id] = level
+        for child in children[node_id]:
+            if child not in level_map:
+                level_map[child] = level + 1
+                queue.append((child, level + 1))
+    
+    # Assign level and isRoot to every node
+    for node in nodes:
+        node["level"] = level_map.get(node["id"], 0)
+        node["isRoot"] = node["id"] in roots
+    
+    # Sort so most important nodes appear first
+    return sorted(nodes, key=lambda x: (-x.get("count", 0), x.get("level", 0)))
 
 
 def extract_mcqs_from_response(resp):
@@ -882,7 +994,7 @@ async def get_next_mcq_gemini(attempt_id: str, db: Session = Depends(get_db)):
     if not attempt:
         raise HTTPException(status_code=404, detail="Attempt not found")
 
-    quiz = db.query(Quiz).filter_by(id=getattr(attempt, 'quizid', getattr(attempt, 'quiz_id', None))).first()
+    quiz = db.query(Quiz).filter_by(id=attempt.quiz_id).first()
     if not quiz:
         raise HTTPException(status_code=404, detail="Quiz not found")
 
