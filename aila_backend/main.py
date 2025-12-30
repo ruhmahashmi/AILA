@@ -3,6 +3,7 @@ load_dotenv()
 import os
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, Body
 from fastapi import WebSocket, WebSocketDisconnect
+from fastapi import Path
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, Depends, HTTPException, Form
 from sqlalchemy.orm import Session
@@ -12,13 +13,16 @@ from sqlalchemy.orm import sessionmaker, Session, relationship
 from sqlalchemy.sql import func
 from sqlalchemy import Boolean, ARRAY
 from sqlalchemy import text as sql_text
+from sqlalchemy import and_
 from pydantic import BaseModel
 from pptx import Presentation
 from typing import List
 from collections import defaultdict
+from typing import Optional
 import asyncio
 import fitz  # PyMuPDF
 import hashlib
+import random
 import uuid
 import shutil
 import json
@@ -28,9 +32,6 @@ import google.generativeai as genai
 from collections import deque
 
 genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
-
-
-
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///ailastar.db")
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {})
@@ -100,10 +101,17 @@ class Segment(Base):
 class MCQ(Base):
     __tablename__ = "mcqs"
     id = Column(String(36), primary_key=True, index=True)
-    segment_id = Column(String(36), ForeignKey("segments.id"))
+    quiz_id = Column(String(36), ForeignKey("quizzes.id"), nullable=True)  # NEW
+    concept_id = Column(String(255), nullable=True)                         # NEW
+    segment_id = Column(String(36), ForeignKey("segments.id"), nullable=True)
+
     question = Column(Text, nullable=False)
     options = Column(JSON, nullable=False)
     answer = Column(Text, nullable=True)
+
+    quiz = relationship("Quiz", backref="mcqs")
+    segment = relationship("Segment")
+
 
 class MCQReqModel(BaseModel):
     course_id: str
@@ -149,6 +157,31 @@ class QuizAttempt(Base):
     started_at = Column(DateTime(timezone=True), server_default=func.now())
     last_activity = Column(DateTime(timezone=True), onupdate=func.now())
     responses = Column(JSON, default=dict)  # {mcq_id: {"answer": ..., "correct": ...}}
+
+class QuizSettings(Base):
+    __tablename__ = "quiz_settings"
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    quiz_id = Column(String(36), ForeignKey("quizzes.id"), nullable=False)
+    week = Column(Integer, nullable=False)
+    min_difficulty = Column(String(20), nullable=True)
+    max_difficulty = Column(String(20), nullable=True)
+    max_questions = Column(Integer, nullable=True)
+    allowed_retries = Column(Integer, nullable=True)
+    feedback_style = Column(String(20), nullable=True)
+    include_spaced = Column(Boolean, default=False)
+
+class QuizSettingsIn(BaseModel):
+    week: int
+    min_difficulty: Optional[str] = None
+    max_difficulty: Optional[str] = None
+    max_questions: Optional[int] = None
+    allowed_retries: Optional[int] = None
+    feedback_style: Optional[str] = None
+    include_spaced: bool = False
+
+class QuizSettingsOut(QuizSettingsIn):
+    id: int
+    quiz_id: str
 
 class MCQResponse(Base):
     __tablename__ = "mcq_responses"
@@ -212,6 +245,12 @@ class ConnectionManager:
                 pass
 
 manager = ConnectionManager()
+
+# --- B. Lock previewed MCQs to a quiz (optional) ---
+class LockPreviewPayload(BaseModel):
+    quiz_id: str
+    items: List[dict]  # [{ "concept_id": "...", "mcqs": [ {...}, ... ] }, ...]
+
 
 def get_db():
     db = SessionLocal()
@@ -593,6 +632,27 @@ def extract_mcqs_from_response(resp):
             return []
     print("[MCQ PARSE ERROR] Response is neither str nor list nor dict:", type(resp))
     return []
+
+def pick_next_concept(concept_ids, responses, include_spaced):
+    # concept_ids: all quiz concepts
+    # responses: {mcq_id: {"concept_id": "...", "correct": bool}}
+
+    if not include_spaced or not responses:
+        # default behavior: your existing selection logic
+        return random.choice(concept_ids)
+
+    # separate “current focus” vs “review” concept pools
+    seen_concepts = {r.get("concept_id") for r in responses.values() if r.get("concept_id")}
+    unseen = [c for c in concept_ids if c not in seen_concepts]
+    review_candidates = list(seen_concepts) or concept_ids
+
+    # 20–30% chance to pull a review concept
+    if random.random() < 0.3:
+        return random.choice(review_candidates)
+    if unseen:
+        return random.choice(unseen)
+    return random.choice(concept_ids)
+
 
 
 
@@ -989,7 +1049,6 @@ async def start_quiz_attempt(
 # --- 4. Fetch next adaptive MCQ (students; Gemini/KG) ---
 @app.get("/api/quiz/attempt/next")
 async def get_next_mcq_gemini(attempt_id: str, db: Session = Depends(get_db)):
-    """Get the next MCQ for a student's quiz attempt, using Gemini LLM."""
     attempt = db.query(QuizAttempt).filter_by(id=attempt_id).first()
     if not attempt:
         raise HTTPException(status_code=404, detail="Attempt not found")
@@ -998,47 +1057,75 @@ async def get_next_mcq_gemini(attempt_id: str, db: Session = Depends(get_db)):
     if not quiz:
         raise HTTPException(status_code=404, detail="Quiz not found")
 
-    # Robustly handle CSV/JSON for concept_ids
-    conceptids = quiz.concept_ids if hasattr(quiz, 'concept_ids') else []
-    if isinstance(conceptids, str):
+    settings = db.query(QuizSettings).filter(
+        QuizSettings.quiz_id == quiz.id
+    ).first()
+
+    max_questions = settings.max_questions if settings else None
+    include_spaced = settings.include_spaced if settings else False
+
+    responses = attempt.responses or {}
+    answered_count = len(responses)
+
+    if max_questions is not None and answered_count >= max_questions:
+        return {"done": True, "reason": "max_questions_reached", "answered": answered_count}
+
+    concept_ids = quiz.concept_ids or []
+    if isinstance(concept_ids, str):
         try:
-            conceptids = json.loads(conceptids)
+            concept_ids = json.loads(concept_ids)
         except Exception:
-            conceptids = [s.strip() for s in conceptids.split(",") if s.strip()]
-    if not isinstance(conceptids, list):
-        conceptids = list(conceptids)
+            concept_ids = [s.strip() for s in concept_ids.split(",") if s.strip()]
 
-    given_mcqs = set(attempt.responses.keys()) if attempt.responses else set()
+    # Use your spaced / next-concept logic
+    concept_id = pick_next_concept(concept_ids, responses, include_spaced)
 
-    for conceptid in conceptids:
-        kg_row = db.execute(
-            sql_text("SELECT node_data, edge_data FROM knowledge_graph WHERE course_id=:c AND week=:w"),
-            {"c": quiz.course_id, "w": quiz.week}
-        ).fetchone()
-        kg_nodes = json.loads(kg_row[0]) if (kg_row and kg_row[0]) else []
+    given_mcqs = set(responses.keys())
 
-        selected_node = next((n for n in kg_nodes if n["id"] == conceptid), None)
-        if not selected_node:
-            continue
-
-        payload = {
-            "course_id": quiz.course_id,
-            "week": quiz.week,
-            "concept_id": conceptid,
-        }
-        resp = await generate_mcqs_kg(payload, db)
-        mcqs = resp.get("mcqs", [])
-
-        for mcq in mcqs:
-            mcq_id = f"gemini-{conceptid}-{hash(mcq['question'])}"
-            if mcq_id not in given_mcqs:
+    # 1) Try cached MCQs for this quiz + concept
+    cached = (
+        db.query(MCQ)
+        .filter(
+            MCQ.quiz_id == quiz.id,
+            MCQ.concept_id == concept_id,
+        )
+        .all()
+    )
+    for m in cached:
+            if m.id not in given_mcqs:
                 return {
-                    "mcq_id": mcq_id,
-                    "question": mcq["question"],
-                    "options": mcq["options"],
-                    "answer": mcq["answer"],  # Only supply if practicing, not for graded quiz
+                    "mcq_id": m.id,
+                    "question": m.question,
+                    "options": m.options,
+                    "answer": m.answer,
+                    "concept_id": m.concept_id,
                 }
+
+    # 2) If no cached MCQ left, generate from KG on the fly
+    payload = {
+        "course_id": quiz.course_id,
+        "week": quiz.week,
+        "concept_id": concept_id,
+    }
+    resp = await generate_mcqs_kg(payload, db)
+    mcqs = resp.get("mcqs", [])
+
+    for mcq in mcqs:
+        mcq_id = f"gemini-{concept_id}-{hash(mcq['question'])}"
+        if mcq_id in given_mcqs:
+            continue
+        # Optionally, you can also cache this one:
+        # db.add(MCQ(...)); db.commit()
+        return {
+            "mcq_id": mcq_id,
+            "question": mcq["question"],
+            "options": mcq["options"],
+            "answer": mcq["answer"],
+            "concept_id": concept_id,
+        }
+
     return {"done": True}
+
 
 # --- 5. Submit MCQ answer for attempt (DB or Gemini MCQ) ---
 @app.post("/api/quiz/attempt/submit")
@@ -1046,27 +1133,35 @@ async def submit_mcq_answer(
     attempt_id: str = Form(...),
     mcq_id: str = Form(...),
     selected: str = Form(...),
-    answer: str = Form(None),  # Only required for Gemini MCQs
+    answer: str = Form(None),          # for Gemini MCQs
+    concept_id: str = Form(None),      # NEW
     db: Session = Depends(get_db)
 ):
     attempt = db.query(QuizAttempt).filter_by(id=attempt_id).first()
     if not attempt:
         raise HTTPException(status_code=404, detail="Attempt not found")
+
     mcq = db.query(MCQ).filter_by(id=mcq_id).first()
 
     if mcq is not None:
-        correct = (selected.strip() == mcq.answer.strip())
+        correct = selected.strip() == mcq.answer.strip()
         answer_val = mcq.answer
         question = mcq.question
+        concept_id_used = mcq.concept_id or concept_id
     elif answer is not None:
-        correct = (selected.strip() == answer.strip())
+        correct = selected.strip() == answer.strip()
         answer_val = answer
         question = "(Generated MCQ)"
+        concept_id_used = concept_id
     else:
         raise HTTPException(status_code=400, detail="No answer key for this MCQ")
 
     responses = attempt.responses or {}
-    responses[mcq_id] = {"selected": selected, "correct": correct}
+    responses[mcq_id] = {
+        "selected": selected,
+        "correct": correct,
+        "concept_id": concept_id_used,
+    }
     attempt.responses = responses
     db.commit()
 
@@ -1076,7 +1171,7 @@ async def submit_mcq_answer(
         mcq_id=mcq_id,
         question=question,
         selected=selected,
-        correct=correct
+        correct=correct,
     )
     db.add(mcq_resp)
     db.commit()
@@ -1128,3 +1223,160 @@ async def delete_upload(uploadid: str = Form(...), db: Session = Depends(get_db)
     db.delete(upload)
     db.commit()
     return {"status": "deleted"}
+
+@app.get("/api/quiz/settings/{quiz_id}", response_model=Optional[QuizSettingsOut])
+async def get_quiz_settings(quiz_id: str, db: Session = Depends(get_db)):
+    qs = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
+    if not qs:
+        return None
+    return QuizSettingsOut(
+        id=qs.id,
+        quiz_id=quiz_id,
+        week=qs.week,
+        min_difficulty=qs.min_difficulty,
+        max_difficulty=qs.max_difficulty,
+        max_questions=qs.max_questions,
+        allowed_retries=qs.allowed_retries,
+        feedback_style=qs.feedback_style,
+        include_spaced=qs.include_spaced,
+    )
+
+@app.get("/api/quiz/questions/{quiz_id}")
+def get_quiz_questions(quiz_id: str, db: Session = Depends(get_db)):
+    quiz = db.query(Quiz).filter_by(id=quiz_id).first()
+    if not quiz:
+        raise HTTPException(status_code=404, detail="Quiz not found")
+
+    mcqs = db.query(MCQ).filter(MCQ.quiz_id == quiz_id).all()
+
+    return {
+        "mcqs": [
+            {
+                "id": m.id,
+                "question": m.question,
+                "options": m.options,
+                "answer": m.answer,
+                "concept_id": m.concept_id,
+            }
+            for m in mcqs
+        ]
+    }
+
+
+@app.post("/api/quiz/settings/{quiz_id}", response_model=QuizSettingsOut)
+async def upsert_quiz_settings(
+    quiz_id: str,
+    payload: QuizSettingsIn,
+    db: Session = Depends(get_db),
+):
+    qs = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
+    if qs is None:
+        qs = QuizSettings(
+            quiz_id=quiz_id,
+            week=payload.week,
+        )
+        db.add(qs)
+
+    qs.week = payload.week
+    qs.min_difficulty = payload.min_difficulty
+    qs.max_difficulty = payload.max_difficulty
+    qs.max_questions = payload.max_questions
+    qs.allowed_retries = payload.allowed_retries
+    qs.feedback_style = payload.feedback_style
+    qs.include_spaced = payload.include_spaced
+
+    db.commit()
+    db.refresh(qs)
+
+    return QuizSettingsOut(
+        id=qs.id,
+        quiz_id=quiz_id,
+        week=qs.week,
+        min_difficulty=qs.min_difficulty,
+        max_difficulty=qs.max_difficulty,
+        max_questions=qs.max_questions,
+        allowed_retries=qs.allowed_retries,
+        feedback_style=qs.feedback_style,
+        include_spaced=qs.include_spaced,
+    )
+
+# --- A. Instructor preview: KG-based sample MCQs (no DB writes) ---
+@app.get("/api/quiz/preview")
+async def preview_quiz(
+    quiz_id: str,
+    n: int = 5,
+    db: Session = Depends(get_db),
+):
+    quiz = db.query(Quiz).filter(Quiz.id == quiz_id).first()
+    if not quiz:
+        raise HTTPException(status_code=404, detail="Quiz not found")
+
+    # Load KG once
+    kg_row = db.execute(
+        sql_text(
+            "SELECT node_data, edge_data FROM knowledge_graph "
+            "WHERE course_id=:c AND week=:w"
+        ),
+        {"c": quiz.course_id, "w": quiz.week},
+    ).fetchone()
+    kg_nodes = json.loads(kg_row[0]) if (kg_row and kg_row[0]) else []
+    kg_edges = json.loads(kg_row[1]) if (kg_row and kg_row[1]) else []
+
+    previews = []
+
+    # For each concept in the quiz, generate 1–k MCQs from KG
+    for cid in quiz.concept_ids:
+        selected_node = next((n for n in kg_nodes if n["id"] == cid), None)
+        if not selected_node:
+            continue
+
+        payload = {
+            "course_id": quiz.course_id,
+            "week": quiz.week,
+            "concept_id": cid,
+        }
+        resp = await generate_mcqs_kg(payload, db)
+        mcqs = resp.get("mcqs", [])[: max(1, n // max(1, len(quiz.concept_ids)))]
+
+        previews.append(
+            {
+                "concept_id": cid,
+                "concept_label": selected_node.get("label", cid),
+                "mcqs": mcqs,
+            }
+        )
+
+    return {"quiz_id": quiz.id, "previews": previews}
+
+
+@app.post("/api/quiz/lock-preview")
+async def lock_preview(payload: LockPreviewPayload, db: Session = Depends(get_db)):
+    quiz = db.query(Quiz).filter(Quiz.id == payload.quiz_id).first()
+    if not quiz:
+        raise HTTPException(status_code=404, detail="Quiz not found")
+
+    created = 0
+    for item in payload.items:
+        cid = item.get("concept_id")
+        for mcq in item.get("mcqs", []):
+            if not (
+                isinstance(mcq, dict)
+                and "question" in mcq
+                and "options" in mcq
+                and "answer" in mcq
+            ):
+                continue
+            db.add(
+                MCQ(
+                    id=str(uuid.uuid4()),
+                    quiz_id=quiz.id,
+                    concept_id=cid,
+                    question=mcq["question"],
+                    options=mcq["options"],
+                    answer=mcq["answer"],
+                )
+            )
+            created += 1
+
+    db.commit()
+    return {"quiz_id": quiz.id, "locked_mcqs": created}

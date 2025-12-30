@@ -28,7 +28,7 @@ export default function QuizCreator({ courseId, week, concepts = [], onQuizCreat
           name: name.trim(),
           course_id: courseId,
           week: week,
-          instructor_id: "YOUR_INSTRUCTOR_ID", // TODO: replace with actual user id
+          instructor_id: "YOUR_INSTRUCTOR_ID", // TODO: real id
           concept_ids: JSON.stringify(selected),
         }),
       });

@@ -1,6 +1,8 @@
 // components/MCQGenerator.js
 import { useState } from "react";
 
+const BACKEND_URL = "http://localhost:8000";
+
 export default function MCQGenerator({
   courseId,
   week,
@@ -13,9 +15,6 @@ export default function MCQGenerator({
   const [loadingKG, setLoadingKG] = useState(false);
   const [error, setError] = useState(null);
 
-  // For debugging prop flow:
-  // console.log({ courseId, week, conceptId, conceptSummary, conceptContents });
-
   async function handleGenerateRaw() {
     setLoading(true);
     setError(null);
@@ -26,9 +25,9 @@ export default function MCQGenerator({
         week: week,
         concept_id: conceptId,
         summary: conceptSummary ?? "",
-        contents: conceptContents ?? ""
+        contents: conceptContents ?? "",
       };
-      const res = await fetch("http://localhost:8000/api/generate-mcqs/", {
+      const res = await fetch(`${BACKEND_URL}/api/generate-mcqs/`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -50,9 +49,9 @@ export default function MCQGenerator({
       const body = {
         course_id: String(courseId),
         week: Number(week),
-        concept_id: conceptId    // Note! Use concept_id for KG too
+        concept_id: conceptId,
       };
-      const res = await fetch("http://localhost:8000/api/generate-mcqs-kg/", {
+      const res = await fetch(`${BACKEND_URL}/api/generate-mcqs-kg/`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -85,7 +84,9 @@ export default function MCQGenerator({
         </button>
       </div>
       {error && <div className="text-red-700 mb-2">{error}</div>}
-      {(loading || loadingKG) && <div className="text-blue-500">MCQs are being generated…</div>}
+      {(loading || loadingKG) && (
+        <div className="text-blue-500">MCQs are being generated…</div>
+      )}
       {mcqs.length > 0 && (
         <div className="mt-4">
           <h3 className="font-semibold mb-2">MCQs</h3>
@@ -94,14 +95,17 @@ export default function MCQGenerator({
               <li key={idx} className="mb-3">
                 <div className="font-medium">{`${idx + 1}. ${q.question}`}</div>
                 <ol type="A" className="ml-6">
-                  {q.options && q.options.map((opt, oi) => (
-                    <li key={oi}>
-                      {opt}
-                      {q.answer === opt && (
-                        <span className="text-green-600 font-bold ml-2">(Answer)</span>
-                      )}
-                    </li>
-                  ))}
+                  {q.options &&
+                    q.options.map((opt, oi) => (
+                      <li key={oi}>
+                        {opt}
+                        {q.answer === opt && (
+                          <span className="text-green-600 font-bold ml-2">
+                            (Answer)
+                          </span>
+                        )}
+                      </li>
+                    ))}
                 </ol>
               </li>
             ))}

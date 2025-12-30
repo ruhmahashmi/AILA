@@ -6,9 +6,7 @@ import AdaptiveQuiz from '../../../../../components/AdaptiveQuiz';
 
 const BACKEND_URL = 'http://localhost:8000';
 const WEEK_COUNT = 11;
-
-// TODO: Replace with real logged-in student ID, e.g., from auth context
-const STUDENT_ID = "YOUR_STUDENT_ID";
+const STUDENT_ID = "YOUR_STUDENT_ID"; // TODO: from auth
 
 export default function StudentCourseWeekPage({ params }) {
   const { id: courseId, weekNumber } = params;
@@ -20,7 +18,6 @@ export default function StudentCourseWeekPage({ params }) {
   const [conceptLabels, setConceptLabels] = useState({});
   const [currentQuiz, setCurrentQuiz] = useState(null);
 
-  // Fetch quizzes for the week
   useEffect(() => {
     fetch(`${BACKEND_URL}/api/quiz/list?course_id=${courseId}&week=${weekNumber}`)
       .then(res => res.json())
@@ -31,7 +28,6 @@ export default function StudentCourseWeekPage({ params }) {
     setCurrentQuiz(null);
   }, [courseId, weekNumber]);
 
-  // Fetch concept labels for this course/week  
   useEffect(() => {
     fetch(`${BACKEND_URL}/api/knowledge-graph/?course_id=${courseId}&week=${weekNumber}`)
       .then(res => res.json())
@@ -42,7 +38,6 @@ export default function StudentCourseWeekPage({ params }) {
       });
   }, [courseId, weekNumber]);
 
-  // When student selects a quiz, start attempt
   async function handleStartQuiz(quizId) {
     setQuizSummary(null);
     setSelectedQuizId(quizId);
@@ -69,7 +64,6 @@ export default function StudentCourseWeekPage({ params }) {
     }
   }
 
-  // When AdaptiveQuiz signals end/quit, show summary
   function handleQuizEnd(summary) {
     setQuizSummary(summary);
     setAttemptId(null);
@@ -77,7 +71,6 @@ export default function StudentCourseWeekPage({ params }) {
     setCurrentQuiz(null);
   }
 
-  // Week navigation sidebar  
   const WeekSelector = () => (
     <div className="w-48 border-r border-gray-300 p-4 bg-white">
       <h3 className="font-semibold mb-2">Select Week</h3>
@@ -102,9 +95,11 @@ export default function StudentCourseWeekPage({ params }) {
     <div className="flex min-h-screen bg-gray-50">
       <WeekSelector />
       <div className="flex-1 flex flex-col p-8">
-        <h2 className="font-semibold text-xl mb-6">Practice Quizzes for Week {weekNumber}</h2>
-        {/* Quiz List */}
-        {!attemptId && !quizSummary ? (
+        <h2 className="font-semibold text-xl mb-6">
+          Practice Quizzes for Week {weekNumber}
+        </h2>
+
+        {!attemptId && !quizSummary && (
           <>
             {quizzes.length === 0 ? (
               <div className="text-gray-600">No quizzes available for this week.</div>
@@ -115,8 +110,8 @@ export default function StudentCourseWeekPage({ params }) {
                     <div className="p-4 bg-white shadow rounded">
                       <div className="font-semibold text-lg">{q.name}</div>
                       <div className="text-gray-600 mb-3 text-sm">
-                        Concepts: {Array.isArray(q.concept_ids) && q.concept_ids.length > 0 ?
-                          q.concept_ids.map(cid => conceptLabels[cid] || cid).join(', ')
+                        Concepts: {Array.isArray(q.concept_ids) && q.concept_ids.length > 0
+                          ? q.concept_ids.map(cid => conceptLabels[cid] || cid).join(', ')
                           : "No concepts tagged"}
                       </div>
                       <button
@@ -131,21 +126,26 @@ export default function StudentCourseWeekPage({ params }) {
               </ul>
             )}
           </>
-        ) : null}
-        {/* Adaptive Quiz Attempt */}
-        {attemptId ? (
+        )}
+
+        {attemptId && (
           <AdaptiveQuiz
             quizId={selectedQuizId}
             attemptId={attemptId}
+            studentId={STUDENT_ID} // optional if you want it there
             onQuizEnd={handleQuizEnd}
           />
-        ) : null}
-        {/* Quiz Summary */}
+        )}
+
         {quizSummary && (
           <div className="mt-8 p-6 bg-green-100 rounded">
             <div className="text-lg font-bold">Quiz Summary</div>
-            <div>Questions Attempted: <strong>{quizSummary.attempted}</strong></div>
-            <div>Correct Answers: <strong>{quizSummary.correct}</strong></div>
+            <div>
+              Questions Attempted: <strong>{quizSummary.attempted}</strong>
+            </div>
+            <div>
+              Correct Answers: <strong>{quizSummary.correct}</strong>
+            </div>
             <button
               className="mt-4 px-4 py-2 bg-gray-300 rounded"
               onClick={() => {
