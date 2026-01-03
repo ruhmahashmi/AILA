@@ -13,8 +13,10 @@ from sqlalchemy.orm import sessionmaker, Session, relationship
 from sqlalchemy.sql import func
 from sqlalchemy import Boolean, ARRAY
 from sqlalchemy import text as sql_text
+from sqlalchemy import text as sqltext
+from sqlalchemy import text
 from sqlalchemy import and_
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from pptx import Presentation
 from typing import List
 from collections import defaultdict
@@ -124,13 +126,14 @@ class MCQPayload(BaseModel):
     segment_id: str
     content: str
 
-class KnowledgeGraph(Base):
-    __tablename__ = "knowledge_graph"
+class KnowledgeGraphBase(Base):
+    __tablename__ = 'knowledge_graph'
     id = Column(String(36), primary_key=True, index=True)
-    course_id = Column(String(36), nullable=False)
+    course_id = Column(String(36), nullable=False)  
     week = Column(Integer, nullable=False)
-    node_data = Column(Text, nullable=False)
-    edge_data = Column(Text, nullable=False)
+    node_data = Column(Text, nullable=False)       
+    edge_data = Column(Text, nullable=False)        
+
 
 class MCQConceptModel(BaseModel):
     course_id: str
@@ -148,6 +151,13 @@ class Quiz(Base):
     concept_ids = Column(JSON, nullable=False)  # List of KG node IDs or segment IDs
     instructor_id = Column(String(36), ForeignKey("users.id"))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class QuizCreate(BaseModel):
+    name: str = "New Quiz"
+    course_id: str
+    week: int
+    instructor_id: str = "unknown"
+    concept_ids: List[str]
 
 class QuizAttempt(Base):
     __tablename__ = "quiz_attempts"
@@ -205,6 +215,9 @@ class MethodFilter(logging.Filter):
                 return True
             return False
         return False
+
+class GenerateQuizMCQsRequest(BaseModel):
+    action: str = "generate_from_concepts"
 
 Base.metadata.create_all(bind=engine)
 
@@ -734,16 +747,31 @@ async def get_segment_detail(segment_id: str, db: Session = Depends(get_db)):
     }
 
 
-@app.get("/api/knowledge-graph/")
-async def get_kg(course_id: str, week: int, db: Session = Depends(get_db)):
+@app.get("/api/knowledge-graph")
+async def getkg(courseid: str, week: int, db: Session = Depends(get_db)):
+    print(f"🔍 KG LOOKUP: courseid='{courseid}' week={week}")
+    
+    # ✅ FIXED: Correct columns + NAMED params (tuple, not list)
     row = db.execute(
-        sql_text("SELECT node_data, edge_data FROM knowledge_graph WHERE course_id=:course_id AND week=:week"),
-        {"course_id": course_id, "week": week}
+        sqltext("SELECT node_data, edge_data FROM knowledge_graph WHERE course_id=:course_id AND week=:week"),
+        {"course_id": courseid, "week": week}
     ).fetchone()
-    if row:
-        return {"nodes": json.loads(row[0]), "edges": json.loads(row[1])}
-    else:
-        return {"nodes": [], "edges": []}
+    
+    print(f"Row found: {row is not None}")
+    
+    if row and row[0] and row[1]:
+        try:
+            nodes = json.loads(row[0])
+            edges = json.loads(row[1])
+            print(f"✅ RETURNED {len(nodes)} nodes, {len(edges)} edges")
+            return {"nodes": nodes, "edges": edges}
+        except Exception as e:
+            print(f"JSON DECODE ERROR: {e}")
+            return {"nodes": [], "edges": []}
+    
+    print("No data found")
+    return {"nodes": [], "edges": []}
+
 
 # ==== RETRIEVAL PRACTICE: MCQ GENERATION (basic stub) ====
 @app.post("/api/generate-mcqs/")
@@ -788,6 +816,16 @@ async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_
     course_id = payload.get("course_id")
     week = payload.get("week")
     concept_id = payload.get("concept_id") or payload.get("segment_id")
+
+    # Fix: Default prompt extension (since we don't have quiz_id here usually)
+    prompt_suffix = ""
+    # Only if passed explicitly (which we will do below)
+    qid = payload.get("quiz_id") 
+    if qid:
+        settings = db.query(QuizSettings).filter(QuizSettings.quiz_id == qid).first()
+        if settings:
+             prompt_suffix = f" Difficulty: {settings.min_difficulty}-{settings.max_difficulty}."
+    # Filter generated mcqs by difficulty (add 'difficulty' to MCQ model/LLM output)
 
     kg_row = db.execute(
         sql_text("SELECT node_data, edge_data FROM knowledge_graph WHERE course_id=:c AND week=:w"),
@@ -980,39 +1018,81 @@ async def websocket_endpoint(websocket: WebSocket, course_id: str, week: int):
 
 # --- 1. Create a quiz (Instructor) ---
 @app.post("/api/quiz/create")
-async def create_quiz(
-    name: str = Form(...),
-    course_id: str = Form(...),
-    week: int = Form(...),
-    concept_ids: str = Form(...),  # Can be JSON or comma-separated
-    instructor_id: str = Form(...),
-    db: Session = Depends(get_db)
-):
-    """Create a quiz for a course, week, and concepts."""
-    try:
-        concepts = json.loads(concept_ids)
-    except Exception:
-        concepts = [s.strip() for s in concept_ids.split(",") if s.strip()]
+async def create_quiz(request: QuizCreate, db: Session = Depends(get_db)):
+    print("✅ Creating quiz:", request.course_id, len(request.concept_ids))
+    
+    # 1. CREATE QUIZ ONLY
+    qid = str(uuid.uuid4())
     quiz = Quiz(
-        id=str(uuid.uuid4()),
-        name=name,
-        course_id=course_id,
-        week=week,
-        concept_ids=concepts,
-        instructor_id=instructor_id
+        id=qid,
+        name=request.name,
+        course_id=request.course_id,
+        week=request.week,
+        concept_ids=request.concept_ids,
+        instructor_id=request.instructor_id
     )
     db.add(quiz)
     db.commit()
-    db.refresh(quiz)
-    return {
-        "quiz": {
-            "id": quiz.id,
-            "name": quiz.name,
-            "course_id": quiz.course_id,
-            "week": quiz.week,
-            "concept_ids": quiz.concept_ids
-        }
-    }
+    
+    print(f"📋 Quiz {qid} created with {len(request.concept_ids)} concepts")
+    return {"quiz_id": qid, "message": "Quiz created, ready for MCQ generation"}
+
+
+
+@app.post("/api/quizzes")
+async def create_quiz(payload: dict, db: Session = Depends(get_db)):
+    print("QUIZ CREATE DEBUG", payload)  # Log payload
+    quiz_id = str(uuid.uuid4())
+    new_quiz = Quiz(
+        id=quiz_id,
+        name=payload.get("name", "New Quiz"),
+        course_id=payload["course_id"],  # Note: use course_id per schema
+        week=payload["week"],
+        concept_ids=payload["concept_ids"],  # List[str]
+        instructor_id=payload.get("instructor_id", "unknown")
+    )
+    db.add(new_quiz)
+    db.commit()
+    db.refresh(new_quiz)
+    
+    mcq_count = 0
+    # Load KG
+    kg_row = db.execute(
+        sqltext("SELECT node_data FROM knowledge_graph WHERE course_id=:c AND week=:w"),
+        {"c": payload["course_id"], "w": payload["week"]}
+    ).fetchone()
+    if kg_row:
+        kg_nodes = json.loads(kg_row[0]) if kg_row[0] else []
+        # Limit to first 3 concepts
+        for cid in payload["concept_ids"][:3]:
+            node = next((n for n in kg_nodes if n.get("id") == cid), None)
+            if node:
+                kg_payload = {
+                    "course_id": payload["course_id"],
+                    "week": payload["week"],
+                    "concept_id": cid,
+                    "summary": node.get("summary", "")[:800],
+                    "contents": node.get("contents", "")[:1500]
+                }
+                try:
+                    resp = await generate_mcqs_kg(kg_payload, db)
+                    mcqs = resp.get("mcqs", [])[:2]  # 2 per concept
+                    for mcq in mcqs:
+                        db.add(MCQ(
+                            id=str(uuid.uuid4()),
+                            quiz_id=quiz_id,
+                            concept_id=cid,
+                            question=mcq.get("question", "Sample Q"),
+                            options=mcq.get("options", ["A", "B", "C", "D"]),
+                            answer=mcq.get("answer", "A")
+                        ))
+                    mcq_count += len(mcqs)
+                except Exception as e:
+                    print(f"MCQ gen failed for {cid}", e)
+    db.commit()
+    print(f"Quiz {quiz_id} created with {mcq_count} MCQs")
+    return {"quiz_id": quiz_id, "generated_mcqs": mcq_count}
+
 
 # --- 2. List all quizzes for a course/week (for student or dashboard) ---
 @app.get("/api/quiz/list")
@@ -1243,24 +1323,24 @@ async def get_quiz_settings(quiz_id: str, db: Session = Depends(get_db)):
 
 @app.get("/api/quiz/questions/{quiz_id}")
 def get_quiz_questions(quiz_id: str, db: Session = Depends(get_db)):
-    quiz = db.query(Quiz).filter_by(id=quiz_id).first()
-    if not quiz:
-        raise HTTPException(status_code=404, detail="Quiz not found")
-
-    mcqs = db.query(MCQ).filter(MCQ.quiz_id == quiz_id).all()
-
-    return {
-        "mcqs": [
-            {
-                "id": m.id,
-                "question": m.question,
-                "options": m.options,
-                "answer": m.answer,
-                "concept_id": m.concept_id,
-            }
-            for m in mcqs
-        ]
-    }
+    print(f"📋 Quiz {quiz_id}")
+    
+    result = db.execute(
+        text("SELECT id, question, options, answer, concept_id FROM mcqs WHERE quiz_id = :quiz_id"),
+        {"quiz_id": quiz_id}
+    ).fetchall()
+    
+    mcqs = []
+    for row in result:
+        mcqs.append({
+            "id": row[0],
+            "question": row[1],
+            "options": row[2],
+            "answer": row[3],
+            "concept_id": row[4]
+        })
+    print(f"🎉 Quiz {quiz_id} + {len(mcqs)} MCQs SAVED")
+    return mcqs
 
 
 @app.post("/api/quiz/settings/{quiz_id}", response_model=QuizSettingsOut)
@@ -1380,3 +1460,42 @@ async def lock_preview(payload: LockPreviewPayload, db: Session = Depends(get_db
 
     db.commit()
     return {"quiz_id": quiz.id, "locked_mcqs": created}
+
+@app.post("/api/quiz/generate-mcqs/{quiz_id}")
+async def generate_quiz_mcqs(quiz_id: str, payload: GenerateQuizMCQsRequest, db: Session = Depends(get_db)):
+    quiz = db.query(Quiz).filter(Quiz.id == quiz_id).first()
+    if not quiz or not quiz.concept_ids:
+        return {"quiz_id": quiz_id, "generated_mcqs": 0, "message": "No concepts"}
+
+    count = 0
+    # Limit concepts
+    target_concepts = quiz.concept_ids[:3] 
+
+    for cid in target_concepts:
+        kg_payload = {
+            "course_id": quiz.course_id,
+            "week": quiz.week,
+            "concept_id": cid,
+            "quiz_id": quiz.id  # <--- PASS THIS so generate_mcqs_kg can find settings!
+        }
+        
+        try:
+            gen_resp = await generate_mcqs_kg(kg_payload, db)
+            new_mcqs = gen_resp.get("mcqs", [])
+            
+            for m in new_mcqs:
+                db.add(MCQ(
+                    id=str(uuid.uuid4()),
+                    quiz_id=quiz.id,
+                    concept_id=cid,
+                    question=m.get("question"),
+                    options=m.get("options"),
+                    answer=m.get("answer")
+                ))
+                count += 1
+        except Exception as e:
+            print(f"Error generating for {cid}: {e}")
+            continue
+
+    db.commit()
+    return {"quiz_id": quiz.id, "generated_mcqs": count}

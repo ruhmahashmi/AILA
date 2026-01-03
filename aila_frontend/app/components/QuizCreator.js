@@ -3,7 +3,7 @@
 
 import { useState } from "react";
 
-const BACKEND_URL = "http://localhost:8000";
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
 
 export default function QuizCreator({ courseId, week, concepts = [], onQuizCreated }) {
   const [name, setName] = useState("");
@@ -18,32 +18,70 @@ export default function QuizCreator({ courseId, week, concepts = [], onQuizCreat
   }
 
   async function handleCreate() {
-    if (!name.trim() || !selected.length) return;
+    // 1. Validate inputs before sending
+    if (!name.trim()) {
+      setError("Please enter a quiz name.");
+      return;
+    }
+    if (selected.length === 0) {
+      setError("Please select at least one concept.");
+      return;
+    }
+
     setSaving(true);
     setError(null);
+
     try {
+      // 2. Prepare payload matching QuizCreate Pydantic model exactly
+      const payload = {
+        name: name.trim(),
+        course_id: String(courseId),     // Force string
+        week: parseInt(week, 10),        // Force integer
+        instructor_id: "unknown",        // Matches default
+        concept_ids: selected            // List[str]
+      };
+
+      console.log("📤 Sending Payload:", payload);
+
       const res = await fetch(`${BACKEND_URL}/api/quiz/create`, {
         method: "POST",
-        body: new URLSearchParams({
-          name: name.trim(),
-          course_id: courseId,
-          week: week,
-          instructor_id: "YOUR_INSTRUCTOR_ID", // TODO: real id
-          concept_ids: JSON.stringify(selected),
-        }),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
       });
-      const data = await res.json();
-      if (data.quiz) {
+
+      const data = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        // 3. Capture Pydantic validation errors (422) detailed message
+        console.error("❌ Backend Error:", data);
+        let msg = `Quiz creation failed (HTTP ${res.status})`;
+        
+        if (data?.detail) {
+          if (Array.isArray(data.detail)) {
+            // Pydantic returns array of errors: [{loc, msg, type}]
+            msg = data.detail.map(e => `${e.loc.join('.')} - ${e.msg}`).join(' | ');
+          } else {
+            msg = String(data.detail);
+          }
+        }
+        setError(msg);
+        setSaving(false);
+        return;
+      }
+
+      // Success!
+      if (data) {
+        console.log("✅ Quiz Created:", data);
         setName("");
         setSelected([]);
-        onQuizCreated && onQuizCreated(data.quiz);
-      } else {
-        setError("Quiz creation failed.");
+        onQuizCreated && onQuizCreated();
       }
-    } catch {
-      setError("Quiz creation failed.");
+    } catch (e) {
+      console.error("❌ Network Error:", e);
+      setError(`Network error: ${e?.message || e}`);
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
   }
 
   return (
@@ -67,15 +105,12 @@ export default function QuizCreator({ courseId, week, concepts = [], onQuizCreat
       </div>
 
       <div>
-        <div className="text-xs font-semibold text-gray-700 mb-1">
-          Select concepts
-        </div>
+        <div className="text-xs font-semibold text-gray-700 mb-1">Select concepts</div>
         <div className="flex flex-wrap gap-2 max-h-40 overflow-auto">
           {concepts.length === 0 && (
-            <div className="text-xs text-gray-500">
-              No concepts available for this week yet.
-            </div>
+            <div className="text-xs text-gray-500">No concepts available for this week yet.</div>
           )}
+
           {concepts.map((c) => {
             const active = selected.includes(c.id);
             return (
@@ -96,7 +131,7 @@ export default function QuizCreator({ courseId, week, concepts = [], onQuizCreat
         </div>
       </div>
 
-      {error && <div className="text-xs text-red-600">{error}</div>}
+      {error && <div className="text-xs text-red-600 mt-2 font-mono break-all">{error}</div>}
     </div>
   );
 }
