@@ -110,6 +110,7 @@ class MCQ(Base):
     question = Column(Text, nullable=False)
     options = Column(JSON, nullable=False)
     answer = Column(Text, nullable=True)
+    difficulty = Column(String(20), default="Medium")
 
     quiz = relationship("Quiz", backref="mcqs")
     segment = relationship("Segment")
@@ -751,7 +752,6 @@ async def get_segment_detail(segment_id: str, db: Session = Depends(get_db)):
 async def getkg(courseid: str, week: int, db: Session = Depends(get_db)):
     print(f"🔍 KG LOOKUP: courseid='{courseid}' week={week}")
     
-    # ✅ FIXED: Correct columns + NAMED params (tuple, not list)
     row = db.execute(
         sqltext("SELECT node_data, edge_data FROM knowledge_graph WHERE course_id=:course_id AND week=:week"),
         {"course_id": courseid, "week": week}
@@ -858,17 +858,43 @@ async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_
     try:
         model = genai.GenerativeModel("models/gemini-2.5-flash")
         response = model.generate_content(prompt)
-        model_output = str(getattr(response, "text", getattr(response, "candidates", response)))
+        
+        # Safe extraction of text
+        if hasattr(response, "text"):
+            model_output = response.text
+        elif hasattr(response, "candidates") and response.candidates:
+            model_output = response.candidates[0].content.parts[0].text
+        else:
+            model_output = str(response)
+
         mcqs = extract_mcqs_from_response(model_output)
         out = []
         for item in mcqs:
-            if isinstance(item, dict) and all(k in item for k in ("question", "options", "answer")) and len(item["options"]) == 4:
+            # Validate structure
+            if isinstance(item, dict) and "question" in item and "options" in item and "answer" in item:
+                # Ensure options is a list
+                if not isinstance(item["options"], list):
+                    continue
+                
+                # Assign difficulty (Random for now, or you can ask LLM to output it)
+                item["difficulty"] = random.choice(["Easy", "Medium", "Hard"])
+                
                 out.append(item)
-        return {"mcqs": out if out else [{"question": f"No MCQs found for concept '{concept_id}' in KG.", "options": [], "answer": ""}]}
+                
+        if not out:
+             return {"mcqs": [{"question": f"No MCQs found for concept '{concept_id}'.", "options": [], "answer": "", "difficulty": "Easy"}]}
+             
+        return {"mcqs": out}
+
     except Exception as ex:
         print("[MCQ KG GENERATION ERROR]", ex)
-        return {"mcqs": [{"question": "Sample fallback MCQ: LLM Error, please try again.", "options": ["A", "B", "C", "D"], "answer": "A"}]}
-    
+        return {"mcqs": [{
+            "question": "Sample fallback MCQ: LLM Error, please try again.", 
+            "options": ["Option A", "Option B", "Option C", "Option D"], 
+            "answer": "Option A",
+            "difficulty": "Medium"
+        }]}
+
 @app.get("/api/mcqs/")
 async def get_mcqs(segment_id: str, db: Session = Depends(get_db)):
     # Return MCQs for the segment
@@ -1011,7 +1037,6 @@ async def websocket_endpoint(websocket: WebSocket, course_id: str, week: int):
     try:
         while True:
             data = await websocket.receive_text()
-            # Echo back for now, can be used for real-time updates
             await manager.send_personal_message(f"Message: {data}", websocket)
     except WebSocketDisconnect:
         manager.disconnect(websocket)
@@ -1157,7 +1182,6 @@ async def get_next_mcq_gemini(attempt_id: str, db: Session = Depends(get_db)):
         except Exception:
             concept_ids = [s.strip() for s in concept_ids.split(",") if s.strip()]
 
-    # Use your spaced / next-concept logic
     concept_id = pick_next_concept(concept_ids, responses, include_spaced)
 
     given_mcqs = set(responses.keys())
@@ -1404,7 +1428,6 @@ async def preview_quiz(
 
     previews = []
 
-    # For each concept in the quiz, generate 1–k MCQs from KG
     for cid in quiz.concept_ids:
         selected_node = next((n for n in kg_nodes if n["id"] == cid), None)
         if not selected_node:
@@ -1468,7 +1491,6 @@ async def generate_quiz_mcqs(quiz_id: str, payload: GenerateQuizMCQsRequest, db:
         return {"quiz_id": quiz_id, "generated_mcqs": 0, "message": "No concepts"}
 
     count = 0
-    # Limit concepts
     target_concepts = quiz.concept_ids[:3] 
 
     for cid in target_concepts:
@@ -1476,7 +1498,7 @@ async def generate_quiz_mcqs(quiz_id: str, payload: GenerateQuizMCQsRequest, db:
             "course_id": quiz.course_id,
             "week": quiz.week,
             "concept_id": cid,
-            "quiz_id": quiz.id  # <--- PASS THIS so generate_mcqs_kg can find settings!
+            "quiz_id": quiz.id  
         }
         
         try:
@@ -1489,8 +1511,9 @@ async def generate_quiz_mcqs(quiz_id: str, payload: GenerateQuizMCQsRequest, db:
                     quiz_id=quiz.id,
                     concept_id=cid,
                     question=m.get("question"),
-                    options=m.get("options"),
-                    answer=m.get("answer")
+                    options=m.get("options"), 
+                    answer=m.get("answer"),
+                    difficulty=m.get("difficulty", "Medium")
                 ))
                 count += 1
         except Exception as e:
@@ -1499,3 +1522,53 @@ async def generate_quiz_mcqs(quiz_id: str, payload: GenerateQuizMCQsRequest, db:
 
     db.commit()
     return {"quiz_id": quiz.id, "generated_mcqs": count}
+
+
+@app.delete("/api/mcq/{mcq_id}")
+async def delete_mcq(mcq_id: str, db: Session = Depends(get_db)):
+    mcq = db.query(MCQ).filter(MCQ.id == mcq_id).first()
+    if not mcq:
+        raise HTTPException(status_code=404, detail="MCQ not found")
+    db.delete(mcq)
+    db.commit()
+    return {"status": "deleted", "id": mcq_id}
+
+@app.post("/api/mcq/regenerate/{mcq_id}")
+async def regenerate_single_mcq(mcq_id: str, db: Session = Depends(get_db)):
+    old_mcq = db.query(MCQ).filter(MCQ.id == mcq_id).first()
+    if not old_mcq:
+        raise HTTPException(status_code=404, detail="MCQ not found")
+    
+    quiz = db.query(Quiz).filter(Quiz.id == old_mcq.quiz_id).first()
+    
+    kg_payload = {
+        "course_id": quiz.course_id,
+        "week": quiz.week,
+        "concept_id": old_mcq.concept_id,
+        "quiz_id": quiz.id
+    }
+    
+    try:
+        gen_resp = await generate_mcqs_kg(kg_payload, db)
+        new_mcqs_data = gen_resp.get("mcqs", [])
+        
+        if not new_mcqs_data:
+             raise HTTPException(status_code=500, detail="Failed to generate replacement")
+
+        best_new = new_mcqs_data[0]
+        
+        old_mcq.question = best_new["question"]
+        old_mcq.options = best_new["options"]
+        old_mcq.answer = best_new["answer"]
+        old_mcq.difficulty = best_new.get("difficulty", "Medium")
+        
+        db.commit()
+        return {"status": "regenerated", "mcq": {
+            "id": old_mcq.id,
+            "question": old_mcq.question,
+            "options": old_mcq.options,
+            "answer": old_mcq.answer
+        }}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

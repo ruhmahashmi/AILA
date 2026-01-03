@@ -77,7 +77,6 @@ export default function CourseWeekPage({ params }) {
       setKnowledgeGraph({ nodes, edges });
     } catch (e) {
       console.error("❌ KG fetch error:", e);
-      // ✅ FIX: Ensure error is a string, NOT an object
       setKgError(e.message || String(e)); 
       setKnowledgeGraph({ nodes: [], edges: [] });
     } finally {
@@ -88,7 +87,6 @@ export default function CourseWeekPage({ params }) {
   const fetchQuizzes = useCallback(async () => {
     if (!courseId || !Number.isFinite(week)) return;
 
-    // ✅ FIXED: changed 'courseid' to 'course_id' to match backend expectation
     const url = `${BACKEND_URL}/api/quiz/list?course_id=${encodeURIComponent(
       courseId
     )}&week=${encodeURIComponent(String(week))}&_t=${Date.now()}`;
@@ -104,7 +102,6 @@ export default function CourseWeekPage({ params }) {
       setQuizzes([]);
     }
   }, [courseId, week]);
-
 
   const handleProcessingStarted = useCallback((processingId, fileName) => {
     setProcessingFiles((prev) => [...prev, { processingId, fileName }]);
@@ -140,7 +137,6 @@ export default function CourseWeekPage({ params }) {
       setQuizPreview({ mcqs });
     } catch (e) {
       console.error("❌ Preview error:", e);
-      // ✅ FIX: Ensure error is a string
       setPreviewError(e.message || String(e));
       setQuizPreview({ mcqs: [] });
     } finally {
@@ -154,10 +150,9 @@ export default function CourseWeekPage({ params }) {
       return;
     }
 
-    // ✅ FIXED: Use 'quiz_id' (snake_case) as primary candidate
     const candidates = [
       `${BACKEND_URL}/api/quiz/stats?quiz_id=${encodeURIComponent(selectedQuizId)}`,
-      `${BACKEND_URL}/api/quiz/stats?quizid=${encodeURIComponent(selectedQuizId)}`, // Fallback
+      `${BACKEND_URL}/api/quiz/stats?quizid=${encodeURIComponent(selectedQuizId)}`,
       `${BACKEND_URL}/api/quiz/stats/${encodeURIComponent(selectedQuizId)}`
     ];
 
@@ -176,7 +171,6 @@ export default function CourseWeekPage({ params }) {
       setQuizStats(null);
     }
   }, [selectedQuizId]);
-
 
   const generateQuizMCQs = useCallback(async () => {
     if (!selectedQuizId) return;
@@ -200,7 +194,6 @@ export default function CourseWeekPage({ params }) {
       await fetchQuizStats();
     } catch (e) {
       console.error("❌ Generate error:", e);
-      // ✅ FIX: Ensure error is a string
       setPreviewError(e.message || String(e));
     } finally {
       setLoadingPreview(false);
@@ -422,17 +415,15 @@ export default function CourseWeekPage({ params }) {
             {/* Quiz Creator */}
             <div className="bg-white rounded-2xl shadow-md border border-gray-200 p-6">
             <QuizCreator
-              key={`${courseId}-${weekNumber}`}     // ✅ forces remount on week change
+              key={`${courseId}-${weekNumber}`}
               courseId={courseId}
-              week={Number(weekNumber)}            // ✅ always matches URL
+              week={Number(weekNumber)}
               concepts={knowledgeGraph.nodes}
               onQuizCreated={() => {
-                // refresh list right after create
                 fetchQuizzes();
               }}
             />
             </div>
-
 
             {/* Quizzes List + Settings */}
             <div className="bg-white rounded-2xl shadow-md border border-gray-200 p-6 space-y-6">
@@ -453,7 +444,7 @@ export default function CourseWeekPage({ params }) {
                         <div className="font-semibold text-lg">{q.name}</div>
                         <div className="text-sm text-gray-600 mt-1">
                           Concepts:{" "}
-                          {(q.concept_ids || q.conceptids || []) // Support both cases
+                          {(q.concept_ids || q.conceptids || [])
                             .map((cid) => {
                               const node = knowledgeGraph.nodes?.find((n) => n.id === cid);
                               return node?.label || cid;
@@ -489,28 +480,128 @@ export default function CourseWeekPage({ params }) {
                 </div>
               )}
 
+              {/* --- ENHANCED QUESTION BANK REVIEW --- */}
               {selectedQuizId && !loadingPreview && (
                 <div className="mt-6 p-4 bg-white rounded-xl shadow border">
-                  {/* ✅ SAFETY FIX: String(previewError) */}
                   {previewError && <p className="text-red-600 text-sm mb-2">{String(previewError)}</p>}
+                  
                   {quizPreview?.mcqs?.length > 0 ? (
-                    <div className="space-y-4 max-h-96 overflow-y-auto">
+                    <div className="space-y-6 max-h-[800px] overflow-y-auto pr-2">
                       {quizPreview.mcqs.map((q, i) => (
-                        <div key={q.id || i} className="p-4 border rounded-lg bg-gray-50">
-                          <div className="font-semibold mb-2 text-gray-900">
-                            Q{i + 1}. {q.question}
+                        <div 
+                          key={q.id || i} 
+                          className="p-5 border border-gray-200 rounded-xl bg-white shadow-sm hover:shadow-md transition-all relative group"
+                        >
+                          {/* --- HEADER: Metadata & Actions --- */}
+                          <div className="flex justify-between items-start mb-3">
+                            <div className="flex flex-wrap gap-2">
+                              {/* CONCEPT LABEL */}
+                              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
+                                🏷️ {knowledgeGraph.nodes?.find(n => n.id === q.concept_id)?.label || q.concept_id || "General"}
+                              </span>
+                              
+                              {/* DIFFICULTY LABEL */}
+                              <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                                 q.difficulty === 'Hard' ? 'bg-red-100 text-red-800' :
+                                 q.difficulty === 'Easy' ? 'bg-green-100 text-green-800' :
+                                 'bg-yellow-100 text-yellow-800'
+                              }`}>
+                                 📊 {q.difficulty || "Medium"}
+                              </span>
+                            </div>
+
+                            {/* ACTION BUTTONS */}
+                            <div className="flex gap-2">
+                              <button
+                                onClick={async () => {
+                                  if(!confirm("Regenerate this specific question?")) return;
+                                  try {
+                                    const res = await fetch(`${BACKEND_URL}/api/mcq/regenerate/${q.id}`, { method: "POST" });
+                                    if(res.ok) {
+                                      loadPreview();
+                                    } else {
+                                      alert("Failed to regenerate");
+                                    }
+                                  } catch(e) { alert(e); }
+                                }}
+                                className="text-xs bg-white border border-gray-300 text-gray-700 hover:bg-blue-50 hover:text-blue-600 px-3 py-1.5 rounded-md shadow-sm flex items-center gap-1"
+                              >
+                                🔄 Regenerate
+                              </button>
+                              
+                              <button
+                                onClick={async () => {
+                                  if(!confirm("Delete this question?")) return;
+                                  try {
+                                    const res = await fetch(`${BACKEND_URL}/api/mcq/${q.id}`, { method: "DELETE" });
+                                    if(res.ok) {
+                                       setQuizPreview(prev => ({
+                                         ...prev,
+                                         mcqs: prev.mcqs.filter(m => m.id !== q.id)
+                                       }));
+                                    } else {
+                                      alert("Failed to delete");
+                                    }
+                                  } catch(e) { alert(e); }
+                                }}
+                                className="text-xs bg-white border border-gray-300 text-gray-700 hover:bg-red-50 hover:text-red-600 px-3 py-1.5 rounded-md shadow-sm flex items-center gap-1"
+                              >
+                                🗑️ Delete
+                              </button>
+                            </div>
                           </div>
-                          <ul className="space-y-1 ml-6 list-disc text-sm">
-                            {Array.isArray(q.options) && q.options.map((opt, j) => <li key={j}>{opt}</li>)}
-                          </ul>
-                          <div className="mt-3 text-green-700 font-medium text-sm">✓ Correct: {q.answer}</div>
+
+                          {/* --- QUESTION --- */}
+                          <div className="mb-4">
+                            <div className="text-sm text-gray-500 font-mono mb-1">Question {i + 1}</div>
+                            <h4 className="text-gray-900 font-medium text-lg leading-relaxed">{q.question}</h4>
+                          </div>
+
+                          {/* --- OPTIONS --- */}
+                          <div className="space-y-2">
+                            {(() => {
+                                let safeOptions = q.options;
+                                // Handle case where options might be a JSON string
+                                if (typeof safeOptions === "string") {
+                                    try { safeOptions = JSON.parse(safeOptions); } catch (e) { console.error("Parse options error", e); }
+                                }
+                                
+                                if (!Array.isArray(safeOptions) || safeOptions.length === 0) {
+                                    return <div className="text-sm text-red-400 italic">No options available (Raw: {JSON.stringify(q.options)})</div>;
+                                }
+
+                                return safeOptions.map((opt, j) => {
+                                  const isCorrect = opt === q.answer;
+                                  return (
+                                    <div 
+                                      key={j} 
+                                      className={`flex items-start gap-3 p-3 rounded-lg border text-sm ${
+                                        isCorrect 
+                                          ? "bg-green-50 border-green-200" 
+                                          : "bg-gray-50 border-gray-100 text-gray-600"
+                                      }`}
+                                    >
+                                      <div className={`mt-0.5 flex-shrink-0 w-4 h-4 rounded-full border flex items-center justify-center ${
+                                        isCorrect ? "border-green-500 bg-green-500 text-white" : "border-gray-300"
+                                      }`}>
+                                        {isCorrect && <span className="text-[10px]">✓</span>}
+                                      </div>
+                                      <div className={isCorrect ? "text-green-900 font-medium" : ""}>
+                                        {opt}
+                                      </div>
+                                    </div>
+                                  );
+                                });
+                            })()}
+                          </div>
                         </div>
                       ))}
                     </div>
                   ) : (
-                    <p className="text-gray-500 italic py-4">
-                      No MCQs yet. Use "Generate MCQs" or create via Quiz Creator.
-                    </p>
+                    <div className="text-center py-12 bg-gray-50 rounded-xl border-2 border-dashed border-gray-200">
+                      <p className="text-gray-500 text-lg">No questions in the bank yet.</p>
+                      <p className="text-gray-400 text-sm mt-1">Click "Generate MCQs" above to start.</p>
+                    </div>
                   )}
                 </div>
               )}
@@ -529,4 +620,5 @@ export default function CourseWeekPage({ params }) {
     </div>
   );
 }
+
 
