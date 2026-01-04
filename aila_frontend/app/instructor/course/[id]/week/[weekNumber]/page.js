@@ -43,6 +43,7 @@ export default function CourseWeekPage({ params }) {
   const [quizPreview, setQuizPreview] = useState(null);
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [previewError, setPreviewError] = useState(null);
+  
 
   const fetchKnowledgeGraph = useCallback(async () => {
     if (!courseId || !Number.isFinite(week)) return;

@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from pptx import Presentation
 from typing import List
 from collections import defaultdict
+from datetime import datetime
 from typing import Optional
 import asyncio
 import fitz  # PyMuPDF
@@ -162,12 +163,14 @@ class QuizCreate(BaseModel):
 
 class QuizAttempt(Base):
     __tablename__ = "quiz_attempts"
-    id = Column(String(36), primary_key=True, index=True)
-    quiz_id = Column(String, ForeignKey('quizzes.id'))
-    student_id = Column(String(36), ForeignKey("users.id"))
+    id = Column(String(50), primary_key=True, index=True)
+    quiz_id = Column(String(50), ForeignKey('quizzes.id'))
+    student_id = Column(String(50), ForeignKey("users.id"))
     started_at = Column(DateTime(timezone=True), server_default=func.now())
     last_activity = Column(DateTime(timezone=True), onupdate=func.now())
     responses = Column(JSON, default=dict)  # {mcq_id: {"answer": ..., "correct": ...}}
+    score = Column(Integer, nullable=True) 
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 class QuizSettings(Base):
     __tablename__ = "quiz_settings"
@@ -193,6 +196,12 @@ class QuizSettingsIn(BaseModel):
 class QuizSettingsOut(QuizSettingsIn):
     id: int
     quiz_id: str
+
+class QuizStartResponse(BaseModel):
+    attempt_id: str
+    questions: List[dict]
+    settings: dict
+    retries_left: int
 
 class MCQResponse(Base):
     __tablename__ = "mcq_responses"
@@ -816,17 +825,36 @@ async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_
     course_id = payload.get("course_id")
     week = payload.get("week")
     concept_id = payload.get("concept_id") or payload.get("segment_id")
+    quiz_id = payload.get("quiz_id")
 
-    # Fix: Default prompt extension (since we don't have quiz_id here usually)
-    prompt_suffix = ""
-    # Only if passed explicitly (which we will do below)
-    qid = payload.get("quiz_id") 
-    if qid:
-        settings = db.query(QuizSettings).filter(QuizSettings.quiz_id == qid).first()
+    # 1. DETERMINE VALID DIFFICULTY RANGE
+    # Default to full range if no settings found
+    valid_difficulties = ["Easy", "Medium", "Hard"] 
+    
+    if quiz_id:
+        settings = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
         if settings:
-             prompt_suffix = f" Difficulty: {settings.min_difficulty}-{settings.max_difficulty}."
-    # Filter generated mcqs by difficulty (add 'difficulty' to MCQ model/LLM output)
+            all_levels = ["Easy", "Medium", "Hard"]
+            min_d = settings.min_difficulty or "Easy"
+            max_d = settings.max_difficulty or "Hard"
+            
+            # Find indices to slice the allowed list
+            try:
+                start_idx = all_levels.index(min_d)
+                end_idx = all_levels.index(max_d)
+                # Handle case where user might set min > max accidentally
+                if start_idx > end_idx: 
+                    start_idx, end_idx = end_idx, start_idx
+                
+                valid_difficulties = all_levels[start_idx : end_idx + 1]
+            except ValueError:
+                # Fallback if DB has weird values
+                valid_difficulties = ["Medium"]
 
+    # Create a string for the prompt, e.g., "Easy, Medium"
+    allowed_diff_str = ", ".join(valid_difficulties)
+
+    # 2. FETCH KG DATA
     kg_row = db.execute(
         sql_text("SELECT node_data, edge_data FROM knowledge_graph WHERE course_id=:c AND week=:w"),
         {"c": course_id, "w": week}
@@ -836,30 +864,32 @@ async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_
         kg_nodes = json.loads(kg_row[0]) if kg_row[0] else []
         kg_edges = json.loads(kg_row[1]) if kg_row[1] else []
 
-    # Find the selected node, if any
+    # Find the selected node
     selected_node = next((n for n in kg_nodes if n["id"] == concept_id), None)
     selected_summary = selected_node.get("summary", "") if selected_node else ""
     selected_contents = selected_node.get("contents", "") if selected_node else ""
 
+    # 3. PROMPT WITH STRICT DIFFICULTY INSTRUCTIONS
     prompt = (
-        f"As a teaching assistant, generate several relevant and varied multiple-choice questions (MCQs) focused on the concept '{concept_id}' "
-        "as it appears in this week's knowledge graph. Use the summary and content of that concept for focus. "
-        "Also use its direct relationships to other concepts in the KG to create integrative questions that require understanding context and relationships. "
-        "The number of questions should reflect the importance and coverage of the concept. "
-        "For each MCQ, ALWAYS include an 'answer' key, as the correct text exactly matching one of the options (not a letter or index)."
+        f"As a teaching assistant, generate several relevant multiple-choice questions (MCQs) focused on the concept '{concept_id}'. "
+        f"TARGET DIFFICULTY LEVELS: {allowed_diff_str}. "  # <--- Explicit instruction
+        "Use the summary and content of the concept for context. "
+        "Also use direct relationships to other concepts in the KG for integrative questions. "
+        "For each MCQ, ALWAYS include an 'answer' key (exact matching text) and a 'difficulty' key.\n"
         "Respond ONLY as a JSON list, e.g.:\n"
-        '[{"question": "...", "options": ["A", "B", "C", "D"], "answer": "..."}]\n'
+        '[{"question": "...", "options": ["A", "B", "C", "D"], "answer": "...", "difficulty": "..."}]\n'
         f"\nConcept summary:\n{selected_summary[:600]}"
         f"\n\nConcept detail/context:\n{selected_contents[:1200]}"
         f"\n\nKnowledge Graph Concepts:\n{json.dumps(kg_nodes)[:1200]}"
         f"\nRelations:\n{json.dumps(kg_edges)[:400]}"
     )
-    print("[DEBUG] MCQ KG Concept Prompt:", prompt)
+    
+    print(f"[DEBUG] Generating MCQs for {concept_id} with allowed difficulties: {valid_difficulties}")
+
     try:
         model = genai.GenerativeModel("models/gemini-2.5-flash")
         response = model.generate_content(prompt)
         
-        # Safe extraction of text
         if hasattr(response, "text"):
             model_output = response.text
         elif hasattr(response, "candidates") and response.candidates:
@@ -872,28 +902,34 @@ async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_
         for item in mcqs:
             # Validate structure
             if isinstance(item, dict) and "question" in item and "options" in item and "answer" in item:
-                # Ensure options is a list
                 if not isinstance(item["options"], list):
                     continue
                 
-                # Assign difficulty (Random for now, or you can ask LLM to output it)
-                item["difficulty"] = random.choice(["Easy", "Medium", "Hard"])
+                # 4. STRICTLY ENFORCE DIFFICULTY ASSIGNMENT
+                # If LLM returns a difficulty not in our list (e.g. returns "Hard" when we only want "Easy"),
+                # or doesn't return one at all, OVERWRITE it with a valid one.
+                if "difficulty" not in item or item["difficulty"] not in valid_difficulties:
+                    item["difficulty"] = random.choice(valid_difficulties)
                 
                 out.append(item)
                 
         if not out:
-             return {"mcqs": [{"question": f"No MCQs found for concept '{concept_id}'.", "options": [], "answer": "", "difficulty": "Easy"}]}
+             # Fallback uses the first valid difficulty
+             fallback_diff = valid_difficulties[0]
+             return {"mcqs": [{"question": f"No MCQs found for concept '{concept_id}'.", "options": [], "answer": "", "difficulty": fallback_diff}]}
              
         return {"mcqs": out}
 
     except Exception as ex:
         print("[MCQ KG GENERATION ERROR]", ex)
+        fallback_diff = valid_difficulties[0] if valid_difficulties else "Medium"
         return {"mcqs": [{
             "question": "Sample fallback MCQ: LLM Error, please try again.", 
             "options": ["Option A", "Option B", "Option C", "Option D"], 
             "answer": "Option A",
-            "difficulty": "Medium"
+            "difficulty": fallback_diff
         }]}
+
 
 @app.get("/api/mcqs/")
 async def get_mcqs(segment_id: str, db: Session = Depends(get_db)):
@@ -1572,3 +1608,266 @@ async def regenerate_single_mcq(mcq_id: str, db: Session = Depends(get_db)):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/student/quiz/start", response_model=QuizStartResponse)
+async def start_student_quiz(
+    quiz_id: str = Body(..., embed=True),
+    student_id: str = Body(..., embed=True),
+    db: Session = Depends(get_db)
+):
+    # 1. Fetch Quiz & Settings
+    quiz = db.query(Quiz).filter(Quiz.id == quiz_id).first()
+    if not quiz:
+        raise HTTPException(status_code=404, detail="Quiz not found")
+        
+    settings = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
+    
+    # Defaults
+    max_q = settings.max_questions if settings else 10
+    allowed_retries = settings.allowed_retries if settings else 3
+    feedback_style = settings.feedback_style if settings else "default"
+
+    # --- ROBUST DIFFICULTY FILTERING LOGIC ---
+    # Use lowercase keys for normalization
+    DIFF_LEVELS = {"easy": 1, "medium": 2, "hard": 3}
+    
+    # Normalize settings (Handle None or mismatch case)
+    min_setting = (settings.min_difficulty or "Easy").lower()
+    max_setting = (settings.max_difficulty or "Hard").lower()
+    
+    min_diff_val = DIFF_LEVELS.get(min_setting, 1)
+    max_diff_val = DIFF_LEVELS.get(max_setting, 3)
+
+    # 2. Check for ACTIVE incomplete attempt (Resume Logic)
+    active_attempt = db.query(QuizAttempt).filter(
+        QuizAttempt.quiz_id == quiz_id,
+        QuizAttempt.student_id == student_id,
+        QuizAttempt.score == None 
+    ).first()
+
+    completed_attempts = db.query(QuizAttempt).filter(
+        QuizAttempt.quiz_id == quiz_id,
+        QuizAttempt.student_id == student_id,
+        QuizAttempt.score != None
+    ).count()
+    
+    # Helper to filter questions
+    def get_filtered_mcqs():
+        all_mcqs = db.query(MCQ).filter(MCQ.quiz_id == quiz_id).all()
+        valid = []
+        for m in all_mcqs:
+            # Normalize DB Value
+            q_diff = (m.difficulty or "Medium").lower()
+            q_val = DIFF_LEVELS.get(q_diff, 2) # Default to Medium if unknown
+            
+            if min_diff_val <= q_val <= max_diff_val:
+                valid.append(m)
+        return valid, all_mcqs
+
+    # 3. Resume Existing Attempt
+    if active_attempt:
+        # Re-select questions using the same logic
+        valid_mcqs, all_mcqs = get_filtered_mcqs()
+        
+        # If filtering leaves nothing, use all_mcqs as fallback (better than empty)
+        target_pool = valid_mcqs if valid_mcqs else all_mcqs
+        
+        selected_mcqs = random.sample(target_pool, min(len(target_pool), max_q))
+        
+        return {
+            "attempt_id": active_attempt.id,
+            "questions": [
+                {
+                    "id": m.id,
+                    "question": m.question,
+                    "options": m.options, 
+                    "difficulty": m.difficulty
+                } for m in selected_mcqs
+            ],
+            "settings": {
+                "feedback_style": feedback_style,
+                "max_questions": max_q
+            },
+            "retries_left": max(0, allowed_retries - completed_attempts)
+        }
+
+    # 4. Check Retries (Only count COMPLETED attempts)
+    if completed_attempts >= allowed_retries:
+         raise HTTPException(status_code=403, detail="No retries remaining")
+
+    # 5. Create NEW Attempt with Filtering
+    valid_mcqs, all_mcqs = get_filtered_mcqs()
+    
+    # STRICT FILTERING: 
+    # If we have valid questions, use ONLY them.
+    # If we have ZERO valid questions (e.g. settings=Easy, DB=Hard only), 
+    # we have two choices: Return empty (error) OR fallback.
+    # Safe choice: Fallback to all_mcqs but maybe warn? For now, fallback.
+    target_pool = valid_mcqs if valid_mcqs else all_mcqs 
+    
+    if not target_pool:
+        # Quiz is literally empty
+        return {
+            "attempt_id": "error",
+            "questions": [],
+            "settings": {},
+            "retries_left": 0
+        }
+
+    selected_mcqs = random.sample(target_pool, min(len(target_pool), max_q))
+    
+    attempt_id = str(uuid.uuid4())
+    new_attempt = QuizAttempt(
+        id=attempt_id,
+        quiz_id=quiz_id,
+        student_id=student_id,
+        responses={} 
+    )
+    db.add(new_attempt)
+    db.commit()
+    
+    return {
+        "attempt_id": attempt_id,
+        "questions": [
+            {
+                "id": m.id,
+                "question": m.question,
+                "options": m.options, 
+                "difficulty": m.difficulty
+            } for m in selected_mcqs
+        ],
+        "settings": {
+            "feedback_style": feedback_style,
+            "max_questions": max_q
+        },
+        "retries_left": max(0, allowed_retries - completed_attempts)
+    }
+
+
+@app.post("/api/student/quiz/submit")
+async def submit_quiz_attempt(
+    attempt_id: str = Body(..., embed=True),
+    responses: dict = Body(..., embed=True), # {mcq_id: "selected_option"}
+    db: Session = Depends(get_db)
+):
+    attempt = db.query(QuizAttempt).filter(QuizAttempt.id == attempt_id).first()
+    if not attempt:
+        raise HTTPException(status_code=404, detail="Attempt not found")
+    
+    # Check if already submitted
+    if attempt.score is not None:
+        # Return existing results if user double-submits
+        # (You might want to fetch and recalculate or just return stored state)
+        pass 
+
+    # Get Settings for Feedback Style
+    settings = db.query(QuizSettings).filter(QuizSettings.quiz_id == attempt.quiz_id).first()
+    style = settings.feedback_style if settings else "default"
+    
+    results = []
+    score = 0
+    total = len(responses) # Or total questions in quiz? Better to use len(responses) for now.
+    
+    for mcq_id, selected_opt in responses.items():
+        mcq = db.query(MCQ).filter(MCQ.id == mcq_id).first()
+        
+        # Handle case where MCQ might be deleted or invalid
+        if not mcq: 
+            results.append({
+                "mcq_id": mcq_id,
+                "selected": selected_opt,
+                "correct": False,
+                "error": "Question not found"
+            })
+            continue
+        
+        is_correct = (selected_opt == mcq.answer)
+        if is_correct: score += 1
+        
+        feedback_item = {
+            "mcq_id": mcq_id,
+            "selected": selected_opt, # <--- THIS IS CRITICAL FOR "Skipped" FIX
+            "correct": is_correct
+        }
+        
+        # Apply Feedback Settings
+        if style == "none":
+            # No hint, no answer
+            pass 
+        elif style == "hint":
+            # Only hint if wrong
+            if not is_correct:
+                # You can store specific hints in DB, or generate generic one
+                feedback_item["hint"] = f"Review the concept: {mcq.concept_id or 'General'}"
+        else: # "default" or "full"
+            # Show correct answer
+            feedback_item["correct_answer"] = mcq.answer
+            
+        results.append(feedback_item)
+        
+    # Save to DB
+    attempt.score = score
+    attempt.responses = responses # Save raw JSON map
+    db.commit()
+    
+    return {
+        "score": score,
+        "total": total,
+        "results": results, 
+        "style": style
+    }
+
+@app.post("/api/student/quiz/check-answer")
+async def check_answer_mcq(
+    quiz_id: str = Body(..., embed=True),
+    mcq_id: str = Body(..., embed=True),
+    selected_opt: str = Body(..., embed=True),
+    attempt_count: int = Body(1, embed=True),
+    db: Session = Depends(get_db)
+):
+    # 1. Get Question & Settings
+    mcq = db.query(MCQ).filter(MCQ.id == mcq_id).first()
+    settings = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
+    
+    if not mcq:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    # 2. Normalize Settings
+    # Handle "Hint only", "Hint", "hint", etc. by normalizing string
+    raw_style = settings.feedback_style if settings else "default"
+    style = raw_style.lower().strip() 
+    
+    max_retries = settings.allowed_retries if settings else 3
+    is_correct = (mcq.answer == selected_opt)
+    
+    response = {
+        "correct": is_correct,
+        "style": raw_style,
+        "retries_exhausted": False
+    }
+
+    # 3. Logic for Incorrect Answers
+    if not is_correct:
+        # Check if attempts are strictly LESS than max (e.g., attempt 1 of 3, 2 of 3)
+        # If attempt_count == max_retries, they just used their last try.
+        if attempt_count < max_retries:
+            response["retries_exhausted"] = False
+            
+            # --- ROBUST STYLE CHECK ---
+            # Checks if "hint" is anywhere in the setting name (e.g. "Hint only")
+            if "hint" in style:
+                concept_text = mcq.concept_id if mcq.concept_id else "course concepts"
+                response["hint"] = f"Review: {concept_text}"
+            
+            # Default behavior (Immediate Feedback) often just says "Incorrect"
+            elif "default" in style or "immediate" in style:
+                response["hint"] = "Incorrect. Try again."
+                
+        else:
+            # Last attempt used -> Exhausted
+            response["retries_exhausted"] = True
+            response["correct_answer"] = mcq.answer
+            response["hint"] = "No more retries."
+
+    return response
