@@ -828,7 +828,7 @@ async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_
     quiz_id = payload.get("quiz_id")
 
     # 1. DETERMINE VALID DIFFICULTY RANGE
-    # Default to full range if no settings found
+    # Default to full range
     valid_difficulties = ["Easy", "Medium", "Hard"] 
     
     if quiz_id:
@@ -838,58 +838,58 @@ async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_
             min_d = settings.min_difficulty or "Easy"
             max_d = settings.max_difficulty or "Hard"
             
-            # Find indices to slice the allowed list
             try:
                 start_idx = all_levels.index(min_d)
                 end_idx = all_levels.index(max_d)
-                # Handle case where user might set min > max accidentally
+                # Handle case where user might swap min/max
                 if start_idx > end_idx: 
                     start_idx, end_idx = end_idx, start_idx
                 
                 valid_difficulties = all_levels[start_idx : end_idx + 1]
             except ValueError:
-                # Fallback if DB has weird values
+                # Fallback if DB has invalid string values
                 valid_difficulties = ["Medium"]
 
-    # Create a string for the prompt, e.g., "Easy, Medium"
-    allowed_diff_str = ", ".join(valid_difficulties)
+    # Debug print to confirm range
+    print(f"[DEBUG] Generating MCQs for {concept_id} with allowed difficulties: {valid_difficulties}")
 
     # 2. FETCH KG DATA
     kg_row = db.execute(
         sql_text("SELECT node_data, edge_data FROM knowledge_graph WHERE course_id=:c AND week=:w"),
         {"c": course_id, "w": week}
     ).fetchone()
-    kg_nodes, kg_edges = [], []
+    
+    kg_nodes = []
+    kg_edges = []
     if kg_row:
         kg_nodes = json.loads(kg_row[0]) if kg_row[0] else []
         kg_edges = json.loads(kg_row[1]) if kg_row[1] else []
 
-    # Find the selected node
+    # Find the selected node data for context
     selected_node = next((n for n in kg_nodes if n["id"] == concept_id), None)
     selected_summary = selected_node.get("summary", "") if selected_node else ""
     selected_contents = selected_node.get("contents", "") if selected_node else ""
 
-    # 3. PROMPT WITH STRICT DIFFICULTY INSTRUCTIONS
-    prompt = (
-        f"As a teaching assistant, generate several relevant multiple-choice questions (MCQs) focused on the concept '{concept_id}'. "
-        f"TARGET DIFFICULTY LEVELS: {allowed_diff_str}. "  # <--- Explicit instruction
-        "Use the summary and content of the concept for context. "
-        "Also use direct relationships to other concepts in the KG for integrative questions. "
-        "For each MCQ, ALWAYS include an 'answer' key (exact matching text) and a 'difficulty' key.\n"
-        "Respond ONLY as a JSON list, e.g.:\n"
-        '[{"question": "...", "options": ["A", "B", "C", "D"], "answer": "...", "difficulty": "..."}]\n'
-        f"\nConcept summary:\n{selected_summary[:600]}"
-        f"\n\nConcept detail/context:\n{selected_contents[:1200]}"
-        f"\n\nKnowledge Graph Concepts:\n{json.dumps(kg_nodes)[:1200]}"
-        f"\nRelations:\n{json.dumps(kg_edges)[:400]}"
-    )
+    # 3. PROMPT LLM
+    # Explicitly list the allowed difficulties in the prompt
+    allowed_str = ", ".join(valid_difficulties)
     
-    print(f"[DEBUG] Generating MCQs for {concept_id} with allowed difficulties: {valid_difficulties}")
+    prompt = (
+        f"As a teaching assistant, generate several relevant multiple-choice questions (MCQs) for the concept '{concept_id}'. "
+        f"TARGET DIFFICULTIES: {allowed_str}. "
+        "Use the summary and content below for context. "
+        "For each MCQ, you MUST include a 'difficulty' field set to one of the target values. "
+        "Respond ONLY as a JSON list in this format: "
+        '[{"question": "...", "options": ["A", "B", "C", "D"], "answer": "...", "difficulty": "..."}]'
+        f"\n\nConcept Summary:\n{selected_summary[:600]}"
+        f"\n\nConcept Details:\n{selected_contents[:1000]}"
+    )
 
     try:
         model = genai.GenerativeModel("models/gemini-2.5-flash")
         response = model.generate_content(prompt)
         
+        # Safely extract text
         if hasattr(response, "text"):
             model_output = response.text
         elif hasattr(response, "candidates") and response.candidates:
@@ -897,32 +897,40 @@ async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_
         else:
             model_output = str(response)
 
+        # Parse response
         mcqs = extract_mcqs_from_response(model_output)
         out = []
+        
         for item in mcqs:
-            # Validate structure
+            # Basic validation
             if isinstance(item, dict) and "question" in item and "options" in item and "answer" in item:
+                # Ensure options is a list
                 if not isinstance(item["options"], list):
                     continue
-                
-                # 4. STRICTLY ENFORCE DIFFICULTY ASSIGNMENT
-                # If LLM returns a difficulty not in our list (e.g. returns "Hard" when we only want "Easy"),
-                # or doesn't return one at all, OVERWRITE it with a valid one.
+
+                # --- CRITICAL FIX: FORCE VALID DIFFICULTY ---
+                # If difficulty is missing OR invalid, overwrite it with a random valid one
                 if "difficulty" not in item or item["difficulty"] not in valid_difficulties:
                     item["difficulty"] = random.choice(valid_difficulties)
                 
                 out.append(item)
-                
+        
+        # If LLM returned valid JSON but no valid items, return fallback
         if not out:
-             # Fallback uses the first valid difficulty
-             fallback_diff = valid_difficulties[0]
-             return {"mcqs": [{"question": f"No MCQs found for concept '{concept_id}'.", "options": [], "answer": "", "difficulty": fallback_diff}]}
+             fallback_diff = random.choice(valid_difficulties)
+             return {"mcqs": [{
+                 "question": f"No valid MCQs generated for '{concept_id}'.", 
+                 "options": ["Option A", "Option B", "Option C", "Option D"], 
+                 "answer": "Option A", 
+                 "difficulty": fallback_diff
+             }]}
              
         return {"mcqs": out}
 
     except Exception as ex:
         print("[MCQ KG GENERATION ERROR]", ex)
-        fallback_diff = valid_difficulties[0] if valid_difficulties else "Medium"
+        # Fallback on crash
+        fallback_diff = random.choice(valid_difficulties) if valid_difficulties else "Medium"
         return {"mcqs": [{
             "question": "Sample fallback MCQ: LLM Error, please try again.", 
             "options": ["Option A", "Option B", "Option C", "Option D"], 
@@ -1335,16 +1343,49 @@ async def quiz_attempt_state(attempt_id: str, db: Session = Depends(get_db)):
 # --- 7. Quiz aggregate stats (by instructor) ---
 @app.get("/api/quiz/stats")
 async def quiz_stats(quiz_id: str, db: Session = Depends(get_db)):
-    """Aggregate stats for a quiz."""
+    # Aggregate stats for a quiz
     attempts = db.query(QuizAttempt).filter_by(quiz_id=quiz_id).all()
     summary = []
+    
     for att in attempts:
-        responses = att.responses or {}
+        # 1. Handle if 'responses' is None
+        raw_responses = att.responses or {}
+        
+        # 2. Handle if 'responses' is a JSON string (SQLite/SQLAlchemy quirk)
+        if isinstance(raw_responses, str):
+            try:
+                responses = json.loads(raw_responses)
+            except:
+                responses = {}
+        else:
+            responses = raw_responses
+
+        # 3. Calculate Correct Count Safely
+        correct_count = 0
+        if isinstance(responses, dict):
+             for v in responses.values():
+                 # Handle if the value inside the dict is ALSO a string (double encoded)
+                 if isinstance(v, str):
+                     try:
+                         v = json.loads(v)
+                     except:
+                         continue # Skip malformed data
+                 
+                 if isinstance(v, dict) and v.get("correct"):
+                     correct_count += 1
+        
         summary.append({
-            "attempted": len(responses),
-            "correct": sum(1 for v in responses.values() if v.get("correct"))
+            "attempt_id": att.id,
+            "student_id": att.student_id,
+            "attempted": len(responses) if isinstance(responses, dict) else 0,
+            "correct": correct_count,
+            "score": att.score
         })
-    return {"total_attempts": len(attempts), "stats": summary}
+
+    return {
+        "total_attempts": len(attempts),
+        "stats": summary
+    }
 
 # --- 8. Home/root route ---
 @app.get("/")
@@ -1383,24 +1424,29 @@ async def get_quiz_settings(quiz_id: str, db: Session = Depends(get_db)):
 
 @app.get("/api/quiz/questions/{quiz_id}")
 def get_quiz_questions(quiz_id: str, db: Session = Depends(get_db)):
-    print(f"📋 Quiz {quiz_id}")
-    
     result = db.execute(
-        text("SELECT id, question, options, answer, concept_id FROM mcqs WHERE quiz_id = :quiz_id"),
+        sql_text("SELECT id, question, options, answer, concept_id, difficulty FROM mcqs WHERE quiz_id = :quiz_id"),
         {"quiz_id": quiz_id}
     ).fetchall()
     
     mcqs = []
     for row in result:
+        # Handle JSON options safely
+        try:
+            opts = json.loads(row[2]) if isinstance(row[2], str) else row[2]
+        except:
+            opts = []
+
         mcqs.append({
             "id": row[0],
             "question": row[1],
-            "options": row[2],
+            "options": opts,
             "answer": row[3],
-            "concept_id": row[4]
+            "concept_id": row[4],
+            "difficulty": row[5] or "Medium"  # <--- FALLBACK HERE
         })
     print(f"🎉 Quiz {quiz_id} + {len(mcqs)} MCQs SAVED")
-    return mcqs
+    return {"mcqs": mcqs}
 
 
 @app.post("/api/quiz/settings/{quiz_id}", response_model=QuizSettingsOut)

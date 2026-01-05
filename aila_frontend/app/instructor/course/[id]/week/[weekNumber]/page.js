@@ -43,7 +43,9 @@ export default function CourseWeekPage({ params }) {
   const [quizPreview, setQuizPreview] = useState(null);
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [previewError, setPreviewError] = useState(null);
-  
+
+  // New Filter State
+  const [filterDifficulty, setFilterDifficulty] = useState("All");
 
   const fetchKnowledgeGraph = useCallback(async () => {
     if (!courseId || !Number.isFinite(week)) return;
@@ -304,6 +306,126 @@ export default function CourseWeekPage({ params }) {
     );
   }
 
+  // --- SUB-COMPONENT FOR SINGLE MCQ ---
+  // To handle show/hide options state independently per question
+  function MCQCard({ q, i, knowledgeGraph, loadPreview }) {
+    const [showOptions, setShowOptions] = useState(false);
+
+    return (
+        <div className="p-5 border border-gray-200 rounded-xl bg-white shadow-sm hover:shadow-md transition-all relative group">
+          {/* --- HEADER: Metadata & Actions --- */}
+          <div className="flex justify-between items-start mb-3">
+            <div className="flex flex-wrap gap-2">
+              {/* CONCEPT LABEL */}
+              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
+                🏷️ {knowledgeGraph.nodes?.find(n => n.id === q.concept_id)?.label || q.concept_id || "General"}
+              </span>
+              
+              {/* DIFFICULTY LABEL */}
+              <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                 q.difficulty === 'Hard' ? 'bg-red-100 text-red-800' :
+                 q.difficulty === 'Easy' ? 'bg-green-100 text-green-800' :
+                 'bg-yellow-100 text-yellow-800'
+              }`}>
+                 📊 {q.difficulty || "Medium"}
+              </span>
+            </div>
+
+            {/* ACTION BUTTONS */}
+            <div className="flex gap-2">
+              <button
+                onClick={async () => {
+                  if(!confirm("Regenerate this specific question?")) return;
+                  try {
+                    const res = await fetch(`${BACKEND_URL}/api/mcq/regenerate/${q.id}`, { method: "POST" });
+                    if(res.ok) {
+                      loadPreview();
+                    } else {
+                      alert("Failed to regenerate");
+                    }
+                  } catch(e) { alert(e); }
+                }}
+                className="text-xs bg-white border border-gray-300 text-gray-700 hover:bg-blue-50 hover:text-blue-600 px-3 py-1.5 rounded-md shadow-sm flex items-center gap-1"
+              >
+                🔄 Regenerate
+              </button>
+              
+              <button
+                onClick={async () => {
+                  if(!confirm("Delete this question?")) return;
+                  try {
+                    const res = await fetch(`${BACKEND_URL}/api/mcq/${q.id}`, { method: "DELETE" });
+                    if(res.ok) {
+                       loadPreview(); // Refresh entire list is safer
+                    } else {
+                      alert("Failed to delete");
+                    }
+                  } catch(e) { alert(e); }
+                }}
+                className="text-xs bg-white border border-gray-300 text-gray-700 hover:bg-red-50 hover:text-red-600 px-3 py-1.5 rounded-md shadow-sm flex items-center gap-1"
+              >
+                🗑️ Delete
+              </button>
+            </div>
+          </div>
+
+          {/* --- QUESTION --- */}
+          <div className="mb-4">
+            <div className="text-sm text-gray-500 font-mono mb-1">Question {i + 1}</div>
+            <h4 className="text-gray-900 font-medium text-lg leading-relaxed">{q.question}</h4>
+          </div>
+
+          {/* --- OPTIONS TOGGLE --- */}
+          <button 
+             onClick={() => setShowOptions(!showOptions)}
+             className="text-sm text-blue-600 font-medium hover:underline focus:outline-none mb-2"
+          >
+             {showOptions ? "Hide Options ▲" : "Show Options ▼"}
+          </button>
+
+          {/* --- OPTIONS --- */}
+          {showOptions && (
+              <div className="space-y-2 mt-2 animate-fadeIn">
+                {(() => {
+                    let safeOptions = q.options;
+                    // Handle case where options might be a JSON string
+                    if (typeof safeOptions === "string") {
+                        try { safeOptions = JSON.parse(safeOptions); } catch (e) { console.error("Parse options error", e); }
+                    }
+                    
+                    if (!Array.isArray(safeOptions) || safeOptions.length === 0) {
+                        return <div className="text-sm text-red-400 italic">No options available (Raw: {JSON.stringify(q.options)})</div>;
+                    }
+
+                    return safeOptions.map((opt, j) => {
+                      const isCorrect = opt === q.answer;
+                      return (
+                        <div 
+                          key={j} 
+                          className={`flex items-start gap-3 p-3 rounded-lg border text-sm ${
+                            isCorrect 
+                              ? "bg-green-50 border-green-200" 
+                              : "bg-gray-50 border-gray-100 text-gray-600"
+                          }`}
+                        >
+                          <div className={`mt-0.5 flex-shrink-0 w-4 h-4 rounded-full border flex items-center justify-center ${
+                            isCorrect ? "border-green-500 bg-green-500 text-white" : "border-gray-300"
+                          }`}>
+                            {isCorrect && <span className="text-[10px]">✓</span>}
+                          </div>
+                          <div className={isCorrect ? "text-green-900 font-medium" : ""}>
+                            {opt}
+                          </div>
+                        </div>
+                      );
+                    });
+                })()}
+              </div>
+          )}
+        </div>
+    );
+  }
+
   return (
     <div className="flex h-screen bg-gray-50">
       {/* LEFT SIDEBAR */}
@@ -483,133 +605,65 @@ export default function CourseWeekPage({ params }) {
 
               {/* --- ENHANCED QUESTION BANK REVIEW --- */}
               {selectedQuizId && !loadingPreview && (
-                <div className="mt-6 p-4 bg-white rounded-xl shadow border">
-                  {previewError && <p className="text-red-600 text-sm mb-2">{String(previewError)}</p>}
-                  
-                  {quizPreview?.mcqs?.length > 0 ? (
-                    <div className="space-y-6 max-h-[800px] overflow-y-auto pr-2">
-                      {quizPreview.mcqs.map((q, i) => (
-                        <div 
-                          key={q.id || i} 
-                          className="p-5 border border-gray-200 rounded-xl bg-white shadow-sm hover:shadow-md transition-all relative group"
-                        >
-                          {/* --- HEADER: Metadata & Actions --- */}
-                          <div className="flex justify-between items-start mb-3">
-                            <div className="flex flex-wrap gap-2">
-                              {/* CONCEPT LABEL */}
-                              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
-                                🏷️ {knowledgeGraph.nodes?.find(n => n.id === q.concept_id)?.label || q.concept_id || "General"}
-                              </span>
-                              
-                              {/* DIFFICULTY LABEL */}
-                              <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                                 q.difficulty === 'Hard' ? 'bg-red-100 text-red-800' :
-                                 q.difficulty === 'Easy' ? 'bg-green-100 text-green-800' :
-                                 'bg-yellow-100 text-yellow-800'
-                              }`}>
-                                 📊 {q.difficulty || "Medium"}
-                              </span>
-                            </div>
+                <div className="mt-8">
+                  {/* Title & Description */}
+                  <div className="mb-4">
+                    <h2 className="text-2xl font-bold text-gray-800">Question Bank Review</h2>
+                    <p className="text-gray-600">Review, approve, or regenerate questions before students see them.</p>
+                  </div>
 
-                            {/* ACTION BUTTONS */}
-                            <div className="flex gap-2">
-                              <button
-                                onClick={async () => {
-                                  if(!confirm("Regenerate this specific question?")) return;
-                                  try {
-                                    const res = await fetch(`${BACKEND_URL}/api/mcq/regenerate/${q.id}`, { method: "POST" });
-                                    if(res.ok) {
-                                      loadPreview();
-                                    } else {
-                                      alert("Failed to regenerate");
-                                    }
-                                  } catch(e) { alert(e); }
-                                }}
-                                className="text-xs bg-white border border-gray-300 text-gray-700 hover:bg-blue-50 hover:text-blue-600 px-3 py-1.5 rounded-md shadow-sm flex items-center gap-1"
-                              >
-                                🔄 Regenerate
-                              </button>
-                              
-                              <button
-                                onClick={async () => {
-                                  if(!confirm("Delete this question?")) return;
-                                  try {
-                                    const res = await fetch(`${BACKEND_URL}/api/mcq/${q.id}`, { method: "DELETE" });
-                                    if(res.ok) {
-                                       setQuizPreview(prev => ({
-                                         ...prev,
-                                         mcqs: prev.mcqs.filter(m => m.id !== q.id)
-                                       }));
-                                    } else {
-                                      alert("Failed to delete");
-                                    }
-                                  } catch(e) { alert(e); }
-                                }}
-                                className="text-xs bg-white border border-gray-300 text-gray-700 hover:bg-red-50 hover:text-red-600 px-3 py-1.5 rounded-md shadow-sm flex items-center gap-1"
-                              >
-                                🗑️ Delete
-                              </button>
-                            </div>
-                          </div>
+                  {/* Filter Buttons */}
+                  <div className="flex gap-2 mb-4">
+                    {["All", "Easy", "Medium", "Hard"].map(level => (
+                      <button 
+                        key={level}
+                        onClick={() => setFilterDifficulty(level)}
+                        className={`px-3 py-1 text-sm font-medium rounded-full transition-colors ${
+                          filterDifficulty === level 
+                            ? 'bg-gray-800 text-white shadow' 
+                            : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                        }`}
+                      >
+                        {level}
+                      </button>
+                    ))}
+                  </div>
 
-                          {/* --- QUESTION --- */}
-                          <div className="mb-4">
-                            <div className="text-sm text-gray-500 font-mono mb-1">Question {i + 1}</div>
-                            <h4 className="text-gray-900 font-medium text-lg leading-relaxed">{q.question}</h4>
-                          </div>
-
-                          {/* --- OPTIONS --- */}
-                          <div className="space-y-2">
-                            {(() => {
-                                let safeOptions = q.options;
-                                // Handle case where options might be a JSON string
-                                if (typeof safeOptions === "string") {
-                                    try { safeOptions = JSON.parse(safeOptions); } catch (e) { console.error("Parse options error", e); }
-                                }
-                                
-                                if (!Array.isArray(safeOptions) || safeOptions.length === 0) {
-                                    return <div className="text-sm text-red-400 italic">No options available (Raw: {JSON.stringify(q.options)})</div>;
-                                }
-
-                                return safeOptions.map((opt, j) => {
-                                  const isCorrect = opt === q.answer;
-                                  return (
-                                    <div 
-                                      key={j} 
-                                      className={`flex items-start gap-3 p-3 rounded-lg border text-sm ${
-                                        isCorrect 
-                                          ? "bg-green-50 border-green-200" 
-                                          : "bg-gray-50 border-gray-100 text-gray-600"
-                                      }`}
-                                    >
-                                      <div className={`mt-0.5 flex-shrink-0 w-4 h-4 rounded-full border flex items-center justify-center ${
-                                        isCorrect ? "border-green-500 bg-green-500 text-white" : "border-gray-300"
-                                      }`}>
-                                        {isCorrect && <span className="text-[10px]">✓</span>}
-                                      </div>
-                                      <div className={isCorrect ? "text-green-900 font-medium" : ""}>
-                                        {opt}
-                                      </div>
-                                    </div>
-                                  );
-                                });
-                            })()}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="text-center py-12 bg-gray-50 rounded-xl border-2 border-dashed border-gray-200">
-                      <p className="text-gray-500 text-lg">No questions in the bank yet.</p>
-                      <p className="text-gray-400 text-sm mt-1">Click "Generate MCQs" above to start.</p>
-                    </div>
-                  )}
+                  <div className="p-4 bg-gray-50 rounded-xl border border-gray-200">
+                    {previewError && <p className="text-red-600 text-sm mb-2">{String(previewError)}</p>}
+                    
+                    {quizPreview?.mcqs?.length > 0 ? (
+                      <div className="space-y-6 max-h-[800px] overflow-y-auto pr-2 custom-scrollbar">
+                        {quizPreview.mcqs
+                          .filter(m => filterDifficulty === "All" || m.difficulty === filterDifficulty)
+                          .map((q, i) => (
+                            <MCQCard 
+                               key={q.id || i} 
+                               q={q} 
+                               i={i} 
+                               knowledgeGraph={knowledgeGraph} 
+                               loadPreview={loadPreview}
+                            />
+                        ))}
+                        {/* Empty State if Filter matches nothing */}
+                        {quizPreview.mcqs.filter(m => filterDifficulty === "All" || m.difficulty === filterDifficulty).length === 0 && (
+                            <p className="text-gray-500 text-center py-4 italic">No questions found with difficulty: {filterDifficulty}</p>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="text-center py-12 bg-white rounded-xl border-2 border-dashed border-gray-200">
+                        <p className="text-gray-500 text-lg">No questions in the bank yet.</p>
+                        <p className="text-gray-400 text-sm mt-1">Click "Generate MCQs" above to start.</p>
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
 
               {quizStats && (
-                <div className="text-sm text-gray-700">
-                  <pre className="bg-gray-50 p-3 rounded-md overflow-x-auto text-xs">
+                <div className="text-sm text-gray-700 mt-4">
+                  <h4 className="font-semibold mb-2">Debug Stats:</h4>
+                  <pre className="bg-gray-100 p-3 rounded-md overflow-x-auto text-xs">
                     {JSON.stringify(quizStats, null, 2)}
                   </pre>
                 </div>
@@ -621,5 +675,3 @@ export default function CourseWeekPage({ params }) {
     </div>
   );
 }
-
-
