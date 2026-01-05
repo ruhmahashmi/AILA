@@ -24,11 +24,126 @@ async function safeJson(res) {
   }
 }
 
+// --- SUB-COMPONENT: MCQ CARD ---
+function MCQCard({ q, i, knowledgeGraph, loadPreview }) {
+  // State to toggle visibility of options/answer
+  const [isOpen, setIsOpen] = useState(false);
+
+  return (
+    <div className={`p-5 border rounded-xl bg-white shadow-sm transition-all group relative ${isOpen ? "border-blue-200 ring-1 ring-blue-50" : "border-gray-200 hover:shadow-md hover:border-gray-300"}`}>
+      
+      {/* Header: Number, Metadata & Actions */}
+      <div className="flex justify-between items-start mb-2">
+        <div className="flex flex-col gap-1">
+           <span className="text-xs font-bold text-gray-400 tracking-wider uppercase">Question {i + 1}</span>
+           <div className="flex flex-wrap gap-2">
+              <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-100 uppercase tracking-wide">
+                {knowledgeGraph.nodes?.find(n => n.id === q.concept_id)?.label || q.concept_id || "Concept"}
+              </span>
+              <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold border uppercase tracking-wide ${
+                 q.difficulty === 'Hard' ? 'bg-red-50 text-red-700 border-red-100' :
+                 q.difficulty === 'Easy' ? 'bg-green-50 text-green-700 border-green-100' :
+                 'bg-yellow-50 text-yellow-700 border-yellow-100'
+              }`}>
+                 {q.difficulty || "Medium"}
+              </span>
+           </div>
+        </div>
+        
+        {/* Actions */}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={async (e) => {
+               e.stopPropagation();
+               if(!confirm("Regenerate this specific question?")) return;
+               await fetch(`${BACKEND_URL}/api/mcq/regenerate/${q.id}`, { method: "POST" });
+               loadPreview();
+            }}
+            className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-gray-500 bg-gray-100 hover:bg-blue-50 hover:text-blue-600 rounded transition-colors"
+            title="Regenerate Question"
+          >
+            🔄
+          </button>
+          <button
+            onClick={async (e) => {
+               e.stopPropagation();
+               if(!confirm("Delete this question?")) return;
+               await fetch(`${BACKEND_URL}/api/mcq/${q.id}`, { method: "DELETE" });
+               loadPreview();
+            }}
+            className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-gray-500 bg-gray-100 hover:bg-red-50 hover:text-red-600 rounded transition-colors"
+            title="Delete Question"
+          >
+            🗑️
+          </button>
+        </div>
+      </div>
+
+      {/* Question Text (Click to Toggle) */}
+      <div 
+        onClick={() => setIsOpen(!isOpen)}
+        className="cursor-pointer group-hover:text-blue-800 transition-colors"
+      >
+        <p className="text-gray-900 font-medium text-lg leading-relaxed">{q.question}</p>
+        
+        {!isOpen && (
+           <div className="mt-2 flex items-center gap-2 text-xs font-medium text-blue-600 opacity-0 group-hover:opacity-100 transition-opacity">
+              <span>Click to view options & answer</span>
+              <span className="text-lg">▾</span>
+           </div>
+        )}
+      </div>
+
+      {/* Options List (Hidden by default) */}
+      {isOpen && (
+        <div className="space-y-2 mt-4 animate-in slide-in-from-top-1 fade-in duration-200">
+          <div className="h-px bg-gray-100 mb-4"></div>
+          {(() => {
+              let safeOptions = q.options;
+              if (typeof safeOptions === "string") {
+                  try { safeOptions = JSON.parse(safeOptions); } catch (e) {}
+              }
+              if (!Array.isArray(safeOptions) || safeOptions.length === 0) return <p className="text-red-400 text-sm italic">No options found.</p>;
+
+              return safeOptions.map((opt, j) => {
+                const isCorrect = opt === q.answer;
+                
+                return (
+                  <div key={j} className={`flex items-start gap-3 p-3 rounded-lg border text-sm transition-all ${
+                    isCorrect 
+                      ? "bg-green-50 border-green-200 ring-1 ring-green-100" // Highlight Correct Answer
+                      : "bg-white border-gray-100 text-gray-600"
+                  }`}>
+                    <div className={`mt-0.5 w-4 h-4 rounded-full border flex items-center justify-center flex-shrink-0 ${
+                      isCorrect ? "bg-green-500 border-green-500 text-white" : "border-gray-300 bg-gray-50"
+                    }`}>
+                      {isCorrect && <span className="text-[9px] font-bold">✓</span>}
+                    </div>
+                    <span className={`leading-snug ${isCorrect ? "font-semibold text-green-900" : ""}`}>{opt}</span>
+                  </div>
+                );
+              });
+          })()}
+          
+          <button 
+             onClick={() => setIsOpen(false)}
+             className="text-xs text-gray-400 hover:text-gray-600 mt-2 flex items-center gap-1"
+          >
+             <span>▴ Collapse</span>
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function CourseWeekPage({ params }) {
   const { id: courseId, weekNumber } = params;
   const router = useRouter();
   const week = Number(weekNumber);
 
+  // --- STATE ---
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [knowledgeGraph, setKnowledgeGraph] = useState({ nodes: [], edges: [] });
   const [kgError, setKgError] = useState(null);
   const [isLoadingKG, setIsLoadingKG] = useState(true);
@@ -38,49 +153,26 @@ export default function CourseWeekPage({ params }) {
 
   const [quizzes, setQuizzes] = useState([]);
   const [selectedQuizId, setSelectedQuizId] = useState(null);
+  const [expandedQuizSettingsId, setExpandedQuizSettingsId] = useState(null); 
 
   const [quizStats, setQuizStats] = useState(null);
   const [quizPreview, setQuizPreview] = useState(null);
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [previewError, setPreviewError] = useState(null);
-
-  // New Filter State
   const [filterDifficulty, setFilterDifficulty] = useState("All");
 
+  // --- FETCHERS ---
   const fetchKnowledgeGraph = useCallback(async () => {
     if (!courseId || !Number.isFinite(week)) return;
-
     setIsLoadingKG(true);
     setKgError(null);
-
-    const url = `${BACKEND_URL}/api/knowledge-graph?courseid=${encodeURIComponent(
-      courseId
-    )}&week=${encodeURIComponent(String(week))}`;
-
     try {
-      console.log("🔄 Fetching KG:", url);
-      const res = await fetch(url, {
-        method: "GET",
-        headers: { Accept: "application/json" },
-        cache: "no-store"
-      });
-
-      if (!res.ok) {
-        const body = await safeJson(res);
-        throw new Error(`KG HTTP ${res.status}. Body: ${JSON.stringify(body)}`);
-      }
-
+      const res = await fetch(`${BACKEND_URL}/api/knowledge-graph?courseid=${courseId}&week=${week}`, { cache: "no-store" });
+      if (!res.ok) throw new Error("KG Load Failed");
       const data = await safeJson(res);
-      console.log("🧠 KG API Response:", data);
-
-      const nodes = Array.isArray(data?.nodes) ? data.nodes : [];
-      const edges = Array.isArray(data?.edges) ? data.edges : [];
-
-      console.log(`✅ KG LOADED: nodes=${nodes.length} edges=${edges.length}`);
-      setKnowledgeGraph({ nodes, edges });
+      setKnowledgeGraph({ nodes: data?.nodes || [], edges: data?.edges || [] });
     } catch (e) {
-      console.error("❌ KG fetch error:", e);
-      setKgError(e.message || String(e)); 
+      setKgError(e.message);
       setKnowledgeGraph({ nodes: [], edges: [] });
     } finally {
       setIsLoadingKG(false);
@@ -89,58 +181,25 @@ export default function CourseWeekPage({ params }) {
 
   const fetchQuizzes = useCallback(async () => {
     if (!courseId || !Number.isFinite(week)) return;
-
-    const url = `${BACKEND_URL}/api/quiz/list?course_id=${encodeURIComponent(
-      courseId
-    )}&week=${encodeURIComponent(String(week))}&_t=${Date.now()}`;
-
     try {
-      console.log("📋 Fetching quizzes from:", url);
-      const res = await fetch(url, { cache: "no-store" });
+      const res = await fetch(`${BACKEND_URL}/api/quiz/list?course_id=${courseId}&week=${week}&_t=${Date.now()}`, { cache: "no-store" });
       const data = await safeJson(res);
-      console.log("📋 Quizzes loaded:", data?.length || 0);
       setQuizzes(Array.isArray(data) ? data : []);
     } catch (e) {
-      console.error("❌ Quizzes fetch error:", e);
       setQuizzes([]);
     }
   }, [courseId, week]);
 
-  const handleProcessingStarted = useCallback((processingId, fileName) => {
-    setProcessingFiles((prev) => [...prev, { processingId, fileName }]);
-  }, []);
-
-  const handleClickConcept = useCallback((id) => {
-    setActiveConceptId(id);
-  }, []);
-
-  const handleSelectQuiz = useCallback((id) => {
-    setSelectedQuizId(id);
-  }, []);
-
   const loadPreview = useCallback(async () => {
     if (!selectedQuizId) return;
-
+    setLoadingPreview(true);
+    setPreviewError(null);
     try {
-      setLoadingPreview(true);
-      setPreviewError(null);
-
-      const res = await fetch(`${BACKEND_URL}/api/quiz/questions/${selectedQuizId}`, {
-        cache: "no-store"
-      });
-
-      if (!res.ok) {
-        const body = await safeJson(res);
-        throw new Error(`Preview HTTP ${res.status}. Body: ${JSON.stringify(body)}`);
-      }
-
+      const res = await fetch(`${BACKEND_URL}/api/quiz/questions/${selectedQuizId}`, { cache: "no-store" });
       const data = await safeJson(res);
-      // normalize to { mcqs: [] }
-      const mcqs = Array.isArray(data) ? data : Array.isArray(data?.mcqs) ? data.mcqs : [];
-      setQuizPreview({ mcqs });
+      setQuizPreview({ mcqs: Array.isArray(data?.mcqs) ? data.mcqs : [] });
     } catch (e) {
-      console.error("❌ Preview error:", e);
-      setPreviewError(e.message || String(e));
+      setPreviewError(e.message);
       setQuizPreview({ mcqs: [] });
     } finally {
       setLoadingPreview(false);
@@ -148,528 +207,398 @@ export default function CourseWeekPage({ params }) {
   }, [selectedQuizId]);
 
   const fetchQuizStats = useCallback(async () => {
-    if (!selectedQuizId) {
-      setQuizStats(null);
-      return;
-    }
-
-    const candidates = [
-      `${BACKEND_URL}/api/quiz/stats?quiz_id=${encodeURIComponent(selectedQuizId)}`,
-      `${BACKEND_URL}/api/quiz/stats?quizid=${encodeURIComponent(selectedQuizId)}`,
-      `${BACKEND_URL}/api/quiz/stats/${encodeURIComponent(selectedQuizId)}`
-    ];
-
+    if (!selectedQuizId) return;
     try {
-      for (const url of candidates) {
-        const res = await fetch(url, { cache: "no-store" });
-        if (res.ok) {
-          const data = await safeJson(res);
-          setQuizStats(data);
-          return;
-        }
-      }
-      setQuizStats(null);
-    } catch (e) {
-      console.error("❌ Stats error:", e);
-      setQuizStats(null);
-    }
+        const res = await fetch(`${BACKEND_URL}/api/quiz/stats?quiz_id=${selectedQuizId}`, { cache: "no-store" });
+        if(res.ok) setQuizStats(await safeJson(res));
+    } catch(e) {}
   }, [selectedQuizId]);
 
-  const generateQuizMCQs = useCallback(async () => {
+  const handleProcessingStarted = useCallback((processingId, fileName) => {
+    setProcessingFiles((prev) => [...prev, { processingId, fileName }]);
+  }, []);
+
+  const handleConceptSelect = useCallback((conceptId) => {
+    setActiveConceptId(conceptId);
+  }, []);
+
+  // --- ACTIONS ---
+  const generateQuizMCQs = async () => {
     if (!selectedQuizId) return;
-
+    setLoadingPreview(true);
     try {
-      setLoadingPreview(true);
-      setPreviewError(null);
-
-      const res = await fetch(`${BACKEND_URL}/api/quiz/generate-mcqs/${selectedQuizId}`, {
+      await fetch(`${BACKEND_URL}/api/quiz/generate-mcqs/${selectedQuizId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "generate_from_concepts" })
       });
-
-      if (!res.ok) {
-        const body = await safeJson(res);
-        throw new Error(`Generate HTTP ${res.status}. Body: ${JSON.stringify(body)}`);
-      }
-
       await loadPreview();
       await fetchQuizStats();
     } catch (e) {
-      console.error("❌ Generate error:", e);
-      setPreviewError(e.message || String(e));
+      console.error(e);
     } finally {
       setLoadingPreview(false);
     }
-  }, [selectedQuizId, loadPreview, fetchQuizStats]);
+  };
 
-  const WeekSelector = () => (
-    <div className="p-6 pt-8">
-      <h3 className="font-bold text-lg mb-4 text-gray-800">Select Week</h3>
-      <div className="space-y-2">
-        {Array.from({ length: WEEK_COUNT }, (_, i) => {
-          const w = i + 1;
-          const isActive = String(weekNumber) === String(w);
-          return (
-            <button
-              key={w}
-              onClick={() => !isActive && router.push(`/instructor/course/${courseId}/week/${w}`)}
-              className={`w-full text-left px-4 py-3 rounded-lg font-medium transition-all ${
-                isActive ? "bg-blue-600 text-white shadow-lg" : "text-gray-700 hover:bg-gray-100 hover:shadow"
-              }`}
-            >
-              Week {w}
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-
-  // Initial load
+  // --- EFFECTS ---
   useEffect(() => {
-    setActiveConceptId(null);
-    setSelectedQuizId(null);
-    setQuizStats(null);
-    setQuizPreview(null);
-    setPreviewError(null);
-
     fetchKnowledgeGraph();
     fetchQuizzes();
   }, [fetchKnowledgeGraph, fetchQuizzes]);
 
-  // Auto-select concept
+  // Auto-select first concept
   useEffect(() => {
     if (knowledgeGraph.nodes.length > 0 && !activeConceptId) {
-      const firstRoot = knowledgeGraph.nodes.find((n) => n.isRoot) || knowledgeGraph.nodes[0];
-      setActiveConceptId(firstRoot.id);
+      setActiveConceptId(knowledgeGraph.nodes.find(n => n.isRoot)?.id || knowledgeGraph.nodes[0].id);
     }
   }, [knowledgeGraph.nodes, activeConceptId]);
 
-  // Load quiz details when selected
+  // Refresh preview when quiz changes
   useEffect(() => {
     if (selectedQuizId) {
       loadPreview();
       fetchQuizStats();
-    } else {
-      setQuizPreview(null);
-      setPreviewError(null);
-      setQuizStats(null);
+      setExpandedQuizSettingsId(selectedQuizId);
     }
   }, [selectedQuizId, loadPreview, fetchQuizStats]);
 
   // Polling
   useEffect(() => {
     if (processingFiles.length === 0) return;
-
-    const intervalId = setInterval(async () => {
-      const results = await Promise.all(
-        processingFiles.map(async ({ processingId }) => {
-          try {
-            const res = await fetch(
-              `${BACKEND_URL}/api/lecture-status?processingid=${encodeURIComponent(processingId)}`,
-              { cache: "no-store" }
-            );
-            const data = await safeJson(res);
-            return { ...data, processingId };
-          } catch {
-            return { status: "error", processingId };
-          }
-        })
-      );
-
-      const doneJobs = results.filter((r) => r.status === "done");
+    const interval = setInterval(async () => {
+      const results = await Promise.all(processingFiles.map(async f => {
+         try {
+             const res = await fetch(`${BACKEND_URL}/api/lecture-status?processingid=${f.processingId}`);
+             const data = await safeJson(res);
+             return { ...data, processingId: f.processingId };
+         } catch { return { status: 'error', processingId: f.processingId }; }
+      }));
+      
+      const doneJobs = results.filter(r => r.status === 'done');
       if (doneJobs.length > 0) {
-        await fetchKnowledgeGraph();
-        await fetchQuizzes();
-        setProcessingFiles((prev) => prev.filter((f) => !doneJobs.some((d) => d.processingId === f.processingId)));
+        fetchKnowledgeGraph();
+        fetchQuizzes();
+        setProcessingFiles(prev => prev.filter(p => !doneJobs.some(d => d.processingId === p.processingId)));
       }
     }, 3000);
-
-    return () => clearInterval(intervalId);
+    return () => clearInterval(interval);
   }, [processingFiles, fetchKnowledgeGraph, fetchQuizzes]);
 
-  const activeConcept =
-    knowledgeGraph.nodes?.find((node) => node.id === activeConceptId) || null;
 
-  if (isLoadingKG && knowledgeGraph.nodes.length === 0) {
-    return (
-      <div className="flex items-center justify-center h-screen bg-gray-50">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
-          <p className="text-lg font-medium text-gray-700">
-            Loading Week {weekNumber} Knowledge Graph...
-          </p>
-          {kgError && <p className="text-sm text-red-600 mt-2">{String(kgError)}</p>}
-        </div>
-      </div>
-    );
-  }
+  // --- RENDER HELPERS ---
+  const activeConcept = knowledgeGraph.nodes?.find(n => n.id === activeConceptId) || null;
+  const activeQuiz = quizzes.find(q => q.id === selectedQuizId);
+  
+  // -- Calculate Counts for Header --
+  const allMcqs = quizPreview?.mcqs || [];
+  const easyCount = allMcqs.filter(m => m.difficulty === "Easy").length;
+  const mediumCount = allMcqs.filter(m => !m.difficulty || m.difficulty === "Medium").length;
+  const hardCount = allMcqs.filter(m => m.difficulty === "Hard").length;
+  const totalCount = allMcqs.length;
 
-  // --- SUB-COMPONENT FOR SINGLE MCQ ---
-  // To handle show/hide options state independently per question
-  function MCQCard({ q, i, knowledgeGraph, loadPreview }) {
-    const [showOptions, setShowOptions] = useState(false);
-
-    return (
-        <div className="p-5 border border-gray-200 rounded-xl bg-white shadow-sm hover:shadow-md transition-all relative group">
-          {/* --- HEADER: Metadata & Actions --- */}
-          <div className="flex justify-between items-start mb-3">
-            <div className="flex flex-wrap gap-2">
-              {/* CONCEPT LABEL */}
-              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
-                🏷️ {knowledgeGraph.nodes?.find(n => n.id === q.concept_id)?.label || q.concept_id || "General"}
-              </span>
-              
-              {/* DIFFICULTY LABEL */}
-              <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                 q.difficulty === 'Hard' ? 'bg-red-100 text-red-800' :
-                 q.difficulty === 'Easy' ? 'bg-green-100 text-green-800' :
-                 'bg-yellow-100 text-yellow-800'
-              }`}>
-                 📊 {q.difficulty || "Medium"}
-              </span>
-            </div>
-
-            {/* ACTION BUTTONS */}
-            <div className="flex gap-2">
-              <button
-                onClick={async () => {
-                  if(!confirm("Regenerate this specific question?")) return;
-                  try {
-                    const res = await fetch(`${BACKEND_URL}/api/mcq/regenerate/${q.id}`, { method: "POST" });
-                    if(res.ok) {
-                      loadPreview();
-                    } else {
-                      alert("Failed to regenerate");
-                    }
-                  } catch(e) { alert(e); }
-                }}
-                className="text-xs bg-white border border-gray-300 text-gray-700 hover:bg-blue-50 hover:text-blue-600 px-3 py-1.5 rounded-md shadow-sm flex items-center gap-1"
-              >
-                🔄 Regenerate
-              </button>
-              
-              <button
-                onClick={async () => {
-                  if(!confirm("Delete this question?")) return;
-                  try {
-                    const res = await fetch(`${BACKEND_URL}/api/mcq/${q.id}`, { method: "DELETE" });
-                    if(res.ok) {
-                       loadPreview(); // Refresh entire list is safer
-                    } else {
-                      alert("Failed to delete");
-                    }
-                  } catch(e) { alert(e); }
-                }}
-                className="text-xs bg-white border border-gray-300 text-gray-700 hover:bg-red-50 hover:text-red-600 px-3 py-1.5 rounded-md shadow-sm flex items-center gap-1"
-              >
-                🗑️ Delete
-              </button>
-            </div>
-          </div>
-
-          {/* --- QUESTION --- */}
-          <div className="mb-4">
-            <div className="text-sm text-gray-500 font-mono mb-1">Question {i + 1}</div>
-            <h4 className="text-gray-900 font-medium text-lg leading-relaxed">{q.question}</h4>
-          </div>
-
-          {/* --- OPTIONS TOGGLE --- */}
-          <button 
-             onClick={() => setShowOptions(!showOptions)}
-             className="text-sm text-blue-600 font-medium hover:underline focus:outline-none mb-2"
-          >
-             {showOptions ? "Hide Options ▲" : "Show Options ▼"}
-          </button>
-
-          {/* --- OPTIONS --- */}
-          {showOptions && (
-              <div className="space-y-2 mt-2 animate-fadeIn">
-                {(() => {
-                    let safeOptions = q.options;
-                    // Handle case where options might be a JSON string
-                    if (typeof safeOptions === "string") {
-                        try { safeOptions = JSON.parse(safeOptions); } catch (e) { console.error("Parse options error", e); }
-                    }
-                    
-                    if (!Array.isArray(safeOptions) || safeOptions.length === 0) {
-                        return <div className="text-sm text-red-400 italic">No options available (Raw: {JSON.stringify(q.options)})</div>;
-                    }
-
-                    return safeOptions.map((opt, j) => {
-                      const isCorrect = opt === q.answer;
-                      return (
-                        <div 
-                          key={j} 
-                          className={`flex items-start gap-3 p-3 rounded-lg border text-sm ${
-                            isCorrect 
-                              ? "bg-green-50 border-green-200" 
-                              : "bg-gray-50 border-gray-100 text-gray-600"
-                          }`}
-                        >
-                          <div className={`mt-0.5 flex-shrink-0 w-4 h-4 rounded-full border flex items-center justify-center ${
-                            isCorrect ? "border-green-500 bg-green-500 text-white" : "border-gray-300"
-                          }`}>
-                            {isCorrect && <span className="text-[10px]">✓</span>}
-                          </div>
-                          <div className={isCorrect ? "text-green-900 font-medium" : ""}>
-                            {opt}
-                          </div>
-                        </div>
-                      );
-                    });
-                })()}
-              </div>
-          )}
-        </div>
-    );
-  }
+  const visibleQuestions = allMcqs.filter(m => filterDifficulty === "All" || (m.difficulty || "Medium") === filterDifficulty);
+  
+  const questionCountLabel = !loadingPreview && totalCount > 0 
+    ? `(${totalCount} total • ${easyCount} Easy, ${mediumCount} Medium, ${hardCount} Hard)`
+    : "";
 
   return (
-    <div className="flex h-screen bg-gray-50">
-      {/* LEFT SIDEBAR */}
-      <div className="w-64 bg-white border-r border-gray-200 shadow-lg z-50 flex-shrink-0">
-        <div className="h-full overflow-y-auto">
-          <WeekSelector />
+    <div className="flex h-screen bg-gray-50 overflow-hidden font-sans text-gray-900">
+      
+      {/* COLLAPSIBLE SIDEBAR */}
+      <div className={`bg-white border-r border-gray-200 shadow-xl z-50 transition-all duration-300 flex flex-col ${sidebarOpen ? "w-64" : "w-16"}`}>
+        <div className="p-4 border-b flex items-center justify-between bg-gray-50">
+          <h2 className={`font-bold text-gray-800 transition-opacity whitespace-nowrap overflow-hidden ${sidebarOpen ? "opacity-100" : "opacity-0 w-0"}`}>Select Week</h2>
+          <button onClick={() => setSidebarOpen(!sidebarOpen)} className="p-1.5 rounded hover:bg-gray-200 text-gray-600 focus:outline-none">
+            {sidebarOpen ? "◀" : "▶"}
+          </button>
+        </div>
+        <div className="overflow-y-auto flex-1 p-2 space-y-1">
+          {Array.from({ length: WEEK_COUNT }, (_, i) => i + 1).map(w => (
+            <button
+              key={w}
+              onClick={() => router.push(`/instructor/course/${courseId}/week/${w}`)}
+              className={`w-full flex items-center px-3 py-2.5 rounded-lg transition-colors ${
+                String(weekNumber) === String(w) ? "bg-blue-600 text-white shadow-md" : "text-gray-600 hover:bg-gray-100"
+              }`}
+              title={`Week ${w}`}
+            >
+              <span className={`font-semibold text-sm whitespace-nowrap ${!sidebarOpen && "hidden"}`}>Week {w}</span>
+              {!sidebarOpen && <span className="mx-auto font-bold text-xs">{w}</span>}
+            </button>
+          ))}
         </div>
       </div>
 
-      {/* MAIN CONTENT */}
-      <div className="flex-1 overflow-hidden flex flex-col">
-        <div className="flex-1 overflow-y-auto pb-10">
-          <div className="max-w-5xl mx-auto px-8 py-8 space-y-8">
-            {/* Header */}
-            <div>
-              <h1 className="text-3xl font-bold text-gray-900">
-                Week {weekNumber} — Lecture Dashboard
-              </h1>
-              <p className="text-gray-600 mt-1">Course ID: {courseId}</p>
-            </div>
+      {/* MAIN SCROLLABLE AREA */}
+      <div className="flex-1 overflow-y-auto">
+        <div className="max-w-[1600px] mx-auto p-6 space-y-8 pb-20">
+          
+          {/* HEADER */}
+          <div>
+            <h1 className="text-3xl font-bold text-gray-900">
+              Week {weekNumber} — Lecture Dashboard
+            </h1>
+            <p className="text-gray-600 mt-1">Course ID: {courseId}</p>
+          </div>
 
-            {/* Upload Section */}
-            <div className="bg-white rounded-2xl shadow-md border border-gray-200 p-6">
-              <div className="flex items-center justify-between mb-4">
-                <div>
-                  <h2 className="text-xl font-semibold">Upload Lecture Slides</h2>
-                  <p className="text-sm text-gray-500 mt-1">
-                    PDF or PPTX • This powers your concept map & quizzes
-                  </p>
-                </div>
-                <UploadLectureForm
-                  courseId={courseId}
-                  weekNumber={weekNumber}
-                  onUploadComplete={handleProcessingStarted}
-                />
+          {/* UPLOAD SECTION */}
+          <div className="bg-white rounded-2xl shadow-md border border-gray-200 p-6">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h2 className="text-xl font-semibold">Upload Lecture Slides</h2>
+                <p className="text-sm text-gray-500 mt-1">
+                  PDF or PPTX • This powers your concept map & quizzes
+                </p>
               </div>
-            </div>
-
-            <UploadedFilesList
-              courseId={courseId}
-              week={weekNumber}
-              onReload={fetchKnowledgeGraph}
-            />
-
-            {processingFiles.length > 0 && (
-              <div className="bg-blue-50 border border-blue-200 rounded-xl p-5">
-                <h3 className="font-semibold text-blue-900 mb-3">Processing Files...</h3>
-                {processingFiles.map(({ processingId, fileName }) => (
-                  <ProcessingFileStatus
-                    key={processingId}
-                    processingId={processingId}
-                    fileName={fileName}
-                  />
-                ))}
-              </div>
-            )}
-
-            {/* KG Debug */}
-            <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-4 text-sm">
-              <div className="flex items-center justify-between">
-                <div className="font-semibold text-yellow-900">KG Debug</div>
-                <button
-                  onClick={fetchKnowledgeGraph}
-                  className="text-xs px-2 py-1 rounded bg-white border hover:bg-gray-50"
-                >
-                  Refresh KG
-                </button>
-              </div>
-              <div className="mt-2 text-yellow-900">
-                nodes={knowledgeGraph.nodes.length} edges={knowledgeGraph.edges.length} loading={String(isLoadingKG)}
-              </div>
-              {kgError && <div className="mt-1 text-red-700">Error: {String(kgError)}</div>}
-            </div>
-
-            {/* Concept Map */}
-            <div className="bg-white rounded-2xl shadow-lg border border-gray-200 overflow-hidden">
-              <div className="p-4 bg-gradient-to-r from-blue-50 to-indigo-50 border-b">
-                <div className="flex items-center justify-between">
-                  <h3 className="font-semibold text-gray-800">
-                    🧠 Concept Map ({knowledgeGraph.nodes.length} nodes, {knowledgeGraph.edges.length} edges)
-                  </h3>
-                  <button
-                    onClick={fetchKnowledgeGraph}
-                    className="text-sm text-blue-600 hover:underline"
-                    disabled={isLoadingKG}
-                  >
-                    🔄 Refresh
-                  </button>
-                </div>
-                {knowledgeGraph.nodes.length === 0 && !isLoadingKG && (
-                  <p className="text-center py-8 text-gray-500">
-                    No concepts yet. Upload slides to generate knowledge graph!
-                  </p>
-                )}
-              </div>
-
-              <ConceptGraph
-                nodes={knowledgeGraph.nodes}
-                edges={knowledgeGraph.edges}
-                onSelect={handleClickConcept}
+              <UploadLectureForm
+                courseId={courseId}
+                weekNumber={weekNumber}
+                onUploadComplete={handleProcessingStarted}
               />
             </div>
-
-            {/* Concept Details */}
-            <div className="bg-white rounded-2xl shadow-md border border-gray-200 p-6">
-              <h2 className="text-xl font-bold mb-4">Concept Details</h2>
-              <SlideViewer concept={activeConcept} courseId={courseId} week={weekNumber} />
-            </div>
-
-            {/* Quiz Creator */}
-            <div className="bg-white rounded-2xl shadow-md border border-gray-200 p-6">
-            <QuizCreator
-              key={`${courseId}-${weekNumber}`}
-              courseId={courseId}
-              week={Number(weekNumber)}
-              concepts={knowledgeGraph.nodes}
-              onQuizCreated={() => {
-                fetchQuizzes();
-              }}
-            />
-            </div>
-
-            {/* Quizzes List + Settings */}
-            <div className="bg-white rounded-2xl shadow-md border border-gray-200 p-6 space-y-6">
-              <div>
-                <h2 className="text-xl font-bold mb-4">Quizzes for Week {weekNumber}</h2>
-                {Array.isArray(quizzes) && quizzes.length > 0 ? (
-                  <div className="space-y-3">
-                    {quizzes.map((q) => (
-                      <button
-                        key={q.id}
-                        onClick={() => handleSelectQuiz(q.id)}
-                        className={`w-full text-left p-5 rounded-xl border-2 transition-all ${
-                          selectedQuizId === q.id
-                            ? "border-blue-500 bg-blue-50 shadow-md"
-                            : "border-gray-200 hover:border-gray-300 hover:shadow"
-                        }`}
-                      >
-                        <div className="font-semibold text-lg">{q.name}</div>
-                        <div className="text-sm text-gray-600 mt-1">
-                          Concepts:{" "}
-                          {(q.concept_ids || q.conceptids || [])
-                            .map((cid) => {
-                              const node = knowledgeGraph.nodes?.find((n) => n.id === cid);
-                              return node?.label || cid;
-                            })
-                            .join(", ") || "None"}
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-gray-500 italic">No quizzes created yet. Create one above!</p>
-                )}
-              </div>
-
-              {selectedQuizId && <QuizSettingsForm quizId={selectedQuizId} week={week} />}
-
-              {selectedQuizId && (
-                <div className="flex gap-3 mb-4">
-                  <button
-                    onClick={loadPreview}
-                    disabled={loadingPreview}
-                    className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50"
-                  >
-                    {loadingPreview ? "Loading..." : "Refresh Preview"}
-                  </button>
-                  <button
-                    onClick={generateQuizMCQs}
-                    disabled={loadingPreview}
-                    className="px-4 py-2 bg-green-600 text-white rounded-lg text-sm hover:bg-green-700 disabled:opacity-50"
-                  >
-                    {loadingPreview ? "Generating..." : "Generate MCQs"}
-                  </button>
-                </div>
-              )}
-
-              {/* --- ENHANCED QUESTION BANK REVIEW --- */}
-              {selectedQuizId && !loadingPreview && (
-                <div className="mt-8">
-                  {/* Title & Description */}
-                  <div className="mb-4">
-                    <h2 className="text-2xl font-bold text-gray-800">Question Bank Review</h2>
-                    <p className="text-gray-600">Review, approve, or regenerate questions before students see them.</p>
-                  </div>
-
-                  {/* Filter Buttons */}
-                  <div className="flex gap-2 mb-4">
-                    {["All", "Easy", "Medium", "Hard"].map(level => (
-                      <button 
-                        key={level}
-                        onClick={() => setFilterDifficulty(level)}
-                        className={`px-3 py-1 text-sm font-medium rounded-full transition-colors ${
-                          filterDifficulty === level 
-                            ? 'bg-gray-800 text-white shadow' 
-                            : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-                        }`}
-                      >
-                        {level}
-                      </button>
-                    ))}
-                  </div>
-
-                  <div className="p-4 bg-gray-50 rounded-xl border border-gray-200">
-                    {previewError && <p className="text-red-600 text-sm mb-2">{String(previewError)}</p>}
-                    
-                    {quizPreview?.mcqs?.length > 0 ? (
-                      <div className="space-y-6 max-h-[800px] overflow-y-auto pr-2 custom-scrollbar">
-                        {quizPreview.mcqs
-                          .filter(m => filterDifficulty === "All" || m.difficulty === filterDifficulty)
-                          .map((q, i) => (
-                            <MCQCard 
-                               key={q.id || i} 
-                               q={q} 
-                               i={i} 
-                               knowledgeGraph={knowledgeGraph} 
-                               loadPreview={loadPreview}
-                            />
-                        ))}
-                        {/* Empty State if Filter matches nothing */}
-                        {quizPreview.mcqs.filter(m => filterDifficulty === "All" || m.difficulty === filterDifficulty).length === 0 && (
-                            <p className="text-gray-500 text-center py-4 italic">No questions found with difficulty: {filterDifficulty}</p>
-                        )}
-                      </div>
-                    ) : (
-                      <div className="text-center py-12 bg-white rounded-xl border-2 border-dashed border-gray-200">
-                        <p className="text-gray-500 text-lg">No questions in the bank yet.</p>
-                        <p className="text-gray-400 text-sm mt-1">Click "Generate MCQs" above to start.</p>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {quizStats && (
-                <div className="text-sm text-gray-700 mt-4">
-                  <h4 className="font-semibold mb-2">Debug Stats:</h4>
-                  <pre className="bg-gray-100 p-3 rounded-md overflow-x-auto text-xs">
-                    {JSON.stringify(quizStats, null, 2)}
-                  </pre>
-                </div>
-              )}
-            </div>
           </div>
+
+          <UploadedFilesList
+            courseId={courseId}
+            week={weekNumber}
+            onReload={fetchKnowledgeGraph}
+          />
+
+          {processingFiles.length > 0 && (
+            <div className="bg-blue-50 border border-blue-200 rounded-xl p-5 mb-6">
+              <h3 className="font-semibold text-blue-900 mb-3">Processing Files...</h3>
+              {processingFiles.map(({ processingId, fileName }) => (
+                <ProcessingFileStatus
+                  key={processingId}
+                  processingId={processingId}
+                  fileName={fileName}
+                />
+              ))}
+            </div>
+          )}
+
+          {/* KG DEBUG */}
+          <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-4 text-sm flex items-center justify-between">
+            <div className="text-yellow-900 font-mono">
+              <strong>KG Debug:</strong> nodes={knowledgeGraph.nodes.length} edges={knowledgeGraph.edges.length} loading={String(isLoadingKG)}
+              {kgError && <span className="ml-2 text-red-600">Error: {String(kgError)}</span>}
+            </div>
+            <button
+              onClick={fetchKnowledgeGraph}
+              className="text-xs px-3 py-1.5 rounded bg-white border border-yellow-300 hover:bg-yellow-100 text-yellow-900"
+            >
+              Refresh KG
+            </button>
+          </div>
+
+          {/* CONCEPT GRAPH */}
+          <div className="bg-white rounded-2xl shadow-lg border border-gray-200 overflow-hidden relative">
+             <div className="p-4 bg-gradient-to-r from-blue-50 to-indigo-50 border-b flex justify-between items-center">
+                <h3 className="font-semibold text-gray-800">🧠 Concept Map</h3>
+                <span className="text-xs text-gray-500 bg-white px-2 py-1 rounded border">Interactive</span>
+             </div>
+             <div className="h-[500px]">
+                <ConceptGraph nodes={knowledgeGraph.nodes} edges={knowledgeGraph.edges} onSelect={setActiveConceptId} />
+             </div>
+          </div>
+
+          {/* SPLIT VIEW: Concept Details + Quiz Creator */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 h-[700px]">
+             {/* LEFT: Concept Details */}
+             <div className="bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col overflow-hidden">
+                <div className="p-4 border-b bg-gray-50 font-bold text-gray-700">Concept Details</div>
+                <div className="flex-1 overflow-y-auto p-4">
+                   <SlideViewer concept={activeConcept} courseId={courseId} week={weekNumber} />
+                </div>
+             </div>
+
+             {/* RIGHT: Quiz Creator */}
+             <div className="bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col overflow-hidden">
+                <div className="p-4 border-b bg-gray-50 font-bold text-gray-700">Create New Quiz</div>
+                <div className="flex-1 overflow-y-auto p-4">
+                  <QuizCreator
+                    key={`${courseId}-${weekNumber}`}
+                    courseId={courseId}
+                    week={Number(weekNumber)}
+                    concepts={knowledgeGraph.nodes}
+                    onQuizCreated={fetchQuizzes}
+                    onConceptClick={handleConceptSelect}
+                  />
+                </div>
+             </div>
+          </div>
+
+          {/* SPLIT VIEW: Quizzes List + Question Bank */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start pt-4 border-t border-gray-200 min-h-[600px]">
+             
+             {/* LEFT COLUMN: Quiz List (4 cols) */}
+             <div className="lg:col-span-4 h-[600px] overflow-y-auto pr-2 custom-scrollbar flex flex-col bg-gray-50 rounded-xl border border-gray-200">
+               <div className="flex items-center justify-between p-4 sticky top-0 bg-gray-50 z-10 border-b border-gray-200">
+                 <h2 className="text-xl font-bold text-gray-800">Your Quizzes <span className="text-gray-500 text-base font-normal">({quizzes.length})</span></h2>
+                 <button onClick={fetchQuizzes} className="text-sm text-blue-600 hover:underline">Refresh</button>
+               </div>
+               
+               <div className="p-4 space-y-4 flex-1">
+                 {quizzes.length === 0 && <p className="text-gray-400 italic text-sm text-center py-10">No quizzes created yet.</p>}
+
+                 {quizzes.map((q, idx) => {
+                   const isSelected = selectedQuizId === q.id;
+                   return (
+                     <div key={q.id} className={`rounded-xl border-2 transition-all overflow-hidden bg-white ${isSelected ? "border-blue-500 shadow-md ring-2 ring-blue-50" : "border-gray-200 hover:border-blue-300"}`}>
+                        
+                        {/* Quiz Header */}
+                        <div 
+                          onClick={() => {
+                             setSelectedQuizId(q.id);
+                             setExpandedQuizSettingsId(q.id); 
+                          }}
+                          className="p-4 cursor-pointer"
+                        >
+                           <div className="flex justify-between items-start mb-1">
+                              <h3 className="font-bold text-lg text-gray-900">{q.name}</h3>
+                              <span className="text-xs font-mono text-gray-400">#{idx + 1}</span>
+                           </div>
+                           <p className="text-xs text-gray-500 mt-1 line-clamp-2">
+                             Concepts: {(q.concept_ids || q.conceptids || []).length}
+                           </p>
+                        </div>
+
+                        {/* Settings Accordion */}
+                        {isSelected && expandedQuizSettingsId === q.id && (
+                           <div className="border-t border-gray-100 bg-gray-50 p-4 animate-in slide-in-from-top-2 duration-200">
+                              <h4 className="text-xs font-bold text-gray-400 uppercase mb-2">Settings</h4>
+                              <QuizSettingsForm quizId={q.id} week={week} />
+                           </div>
+                        )}
+                     </div>
+                   );
+                 })}
+               </div>
+             </div>
+
+             {/* RIGHT COLUMN: Question Bank Review (8 cols) */}
+             <div className="lg:col-span-8 h-[600px]">
+               {selectedQuizId ? (
+                 <div className="bg-white rounded-xl shadow-lg border border-gray-200 h-full flex flex-col">
+                    {/* Toolbar */}
+                    <div className="p-4 border-b bg-gray-50 flex flex-col gap-4 z-20 backdrop-blur-md bg-white/95 rounded-t-xl">
+                       <div className="flex flex-wrap gap-4 justify-between items-start">
+                         <div>
+                           <h2 className="text-lg font-bold text-gray-800 flex items-center gap-2">
+                             Question Bank 
+                             <span className="text-xs font-normal text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full">
+                               {activeQuiz?.name}
+                             </span>
+                           </h2>
+                           {/* Detailed Counts */}
+                           <p className="text-xs text-gray-500 mt-1 font-medium">{questionCountLabel}</p>
+                           
+                           {/* Concept Chips Display */}
+                           <div className="flex flex-wrap gap-1 mt-2">
+                             {(activeQuiz?.concept_ids || []).map(cid => (
+                               <span key={cid} className="px-2 py-0.5 rounded-full text-[10px] bg-gray-100 text-gray-600 border border-gray-200">
+                                 {knowledgeGraph.nodes.find(n => n.id === cid)?.label || cid}
+                               </span>
+                             ))}
+                           </div>
+                         </div>
+                         
+                         {/* Filter Buttons */}
+                         <div className="flex bg-gray-200 p-1 rounded-lg self-start">
+                            {["All", "Easy", "Medium", "Hard"].map(lvl => {
+                              // Dynamic count for filter buttons
+                              let count = 0;
+                              if (lvl === "All") count = totalCount;
+                              else if (lvl === "Easy") count = easyCount;
+                              else if (lvl === "Medium") count = mediumCount;
+                              else if (lvl === "Hard") count = hardCount;
+
+                              return (
+                                <button
+                                  key={lvl}
+                                  onClick={() => setFilterDifficulty(lvl)}
+                                  className={`px-3 py-1 text-xs font-semibold rounded-md transition-all flex gap-1 ${filterDifficulty === lvl ? "bg-white text-blue-700 shadow-sm" : "text-gray-500 hover:text-gray-700"}`}
+                                >
+                                  {lvl} <span className="opacity-50 text-[10px] self-center">({count})</span>
+                                </button>
+                              );
+                            })}
+                         </div>
+                       </div>
+
+                       {/* Action Buttons */}
+                       <div className="flex gap-3 pt-2 border-t border-gray-100">
+                          <button 
+                            onClick={generateQuizMCQs}
+                            disabled={loadingPreview}
+                            className="flex-1 bg-green-600 text-white py-2 rounded-lg text-sm font-semibold hover:bg-green-700 disabled:opacity-50 shadow-sm transition-colors flex items-center justify-center gap-2"
+                          >
+                            {loadingPreview ? "Generating..." : "✨ Generate / Add More Questions"}
+                          </button>
+                          <button 
+                            onClick={loadPreview}
+                            className="px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-50 transition-colors font-medium flex items-center gap-2"
+                          >
+                            🔄 Refresh
+                          </button>
+                       </div>
+                    </div>
+
+                    {/* Question List */}
+                    <div className="p-6 bg-gray-50/50 flex-1 overflow-y-auto custom-scrollbar">
+                       {previewError && <div className="bg-red-50 text-red-600 p-4 rounded mb-4 text-sm border border-red-200">{previewError}</div>}
+                       
+                       {!loadingPreview && visibleQuestions.length > 0 ? (
+                          <div className="grid grid-cols-1 gap-4">
+                            {visibleQuestions.map((q, i) => (
+                                <MCQCard key={q.id || i} q={q} i={i} knowledgeGraph={knowledgeGraph} loadPreview={loadPreview} />
+                            ))}
+                          </div>
+                       ) : (
+                          !loadingPreview && (
+                            <div className="flex flex-col items-center justify-center h-full min-h-[300px] text-gray-400">
+                               <div className="text-5xl mb-4 opacity-20">📝</div>
+                               <p className="text-lg font-medium text-gray-500">
+                                  {allMcqs.length > 0 ? `No ${filterDifficulty} questions found.` : "No questions generated yet."}
+                               </p>
+                               <p className="text-sm text-gray-400 mt-1">
+                                  {allMcqs.length > 0 ? "Try changing the filter." : "Click 'Generate / Add More Questions' above to start."}
+                               </p>
+                            </div>
+                          )
+                       )}
+                       
+                       {loadingPreview && (
+                           <div className="flex flex-col items-center justify-center h-64">
+                             <div className="animate-spin h-10 w-10 border-4 border-blue-500 border-t-transparent rounded-full mb-4"></div>
+                             <p className="text-sm font-medium text-gray-500">Loading Questions...</p>
+                           </div>
+                       )}
+                    </div>
+                 </div>
+               ) : (
+                 <div className="h-full flex flex-col items-center justify-center bg-gray-50 rounded-xl border-2 border-dashed border-gray-200 text-gray-400">
+                    <span className="text-4xl mb-4">👈</span>
+                    <p className="font-medium text-lg">Select a quiz from the left</p>
+                    <p className="text-sm">to manage settings and review questions.</p>
+                 </div>
+               )}
+             </div>
+
+          </div>
+
+          {/* Stats Debug */}
+          {quizStats && (
+             <div className="mt-8 pt-4 border-t border-gray-200">
+                <details className="text-xs text-gray-400 cursor-pointer">
+                   <summary>Debug Stats</summary>
+                   <pre className="mt-2 bg-gray-100 p-4 rounded overflow-x-auto">{JSON.stringify(quizStats, null, 2)}</pre>
+                </details>
+             </div>
+          )}
+
         </div>
       </div>
     </div>

@@ -5,7 +5,7 @@ import { useState } from "react";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
 
-export default function QuizCreator({ courseId, week, concepts = [], onQuizCreated }) {
+export default function QuizCreator({ courseId, week, concepts = [], onQuizCreated, onConceptClick }) {
   const [name, setName] = useState("");
   const [selected, setSelected] = useState([]);
   const [saving, setSaving] = useState(false);
@@ -15,6 +15,11 @@ export default function QuizCreator({ courseId, week, concepts = [], onQuizCreat
     setSelected((prev) =>
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
     );
+    
+    // Trigger external handler to update "Concept Details" view
+    if (onConceptClick) {
+      onConceptClick(id);
+    }
   }
 
   async function handleCreate() {
@@ -117,10 +122,10 @@ export default function QuizCreator({ courseId, week, concepts = [], onQuizCreat
               <button
                 key={c.id}
                 type="button"
-                className={`px-2 py-1 rounded-full text-xs border ${
+                className={`px-2 py-1 rounded-full text-xs border transition-colors duration-200 ${
                   active
-                    ? "bg-green-500 border-green-500 text-white"
-                    : "bg-gray-100 border-gray-300 text-gray-800 hover:bg-gray-200"
+                    ? "bg-green-500 border-green-500 text-white shadow-sm"
+                    : "bg-gray-50 border-gray-300 text-gray-700 hover:bg-gray-100"
                 }`}
                 onClick={() => toggleConcept(c.id)}
               >
@@ -131,7 +136,7 @@ export default function QuizCreator({ courseId, week, concepts = [], onQuizCreat
         </div>
       </div>
 
-      {error && <div className="text-xs text-red-600 mt-2 font-mono break-all">{error}</div>}
+      {error && <div className="text-xs text-red-600 mt-2 font-mono break-all bg-red-50 p-2 rounded border border-red-200">{error}</div>}
     </div>
   );
 }
