@@ -19,12 +19,13 @@ from sqlalchemy import and_
 from pydantic import BaseModel, Field
 from pptx import Presentation
 from typing import List
-from collections import defaultdict
+from collections import deque, defaultdict
 from datetime import datetime
 from typing import Optional
 import asyncio
 import fitz  # PyMuPDF
 import hashlib
+import traceback
 import random
 import uuid
 import shutil
@@ -267,6 +268,8 @@ class ConnectionManager:
                 # Connection might be closed
                 pass
 
+            
+
 manager = ConnectionManager()
 
 # --- B. Lock previewed MCQs to a quiz (optional) ---
@@ -333,254 +336,214 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
     import json
     import uuid
     import os
-    import fitz
+    import fitz  # PyMuPDF
     from pptx import Presentation
     from collections import defaultdict
     import re
+    import traceback
+    from sqlalchemy import text as sql_text # Ensure this import exists
 
     db = SessionLocal()
-    llm = Gemini(model="models/gemini-2.5-flash")  
+    # Use Pro model for better reasoning capacity
+    llm = Gemini(model="models/gemini-2.5-flash") 
 
     try:
+        # 0. Init Status
         db.query(LectureProcessing).filter(LectureProcessing.id == processing_id).update({
-            "status": "processing", "progress": 0, "error_message": None
+            "status": "processing", "progress": 5, "error_message": None
         })
         db.commit()
 
-        # ---------- 1. Extract segments ----------
-        segments = []
+        # ---------- 1. Extract Slides (Restore Segments) ----------
+        segments_data = []
         ext = os.path.splitext(filepath)[-1].lower()
+        
         if ext == ".pdf":
             doc = fitz.open(filepath)
             for i, page in enumerate(doc):
                 text = page.get_text(sort=True)
                 if text.strip():
-                    segments.append({"slide_num": i + 1, "text": text})
+                    segments_data.append({"slide_num": i + 1, "text": text})
         elif ext == ".pptx":
             prs = Presentation(filepath)
             for i, slide in enumerate(prs.slides):
                 lines = [shape.text for shape in slide.shapes if hasattr(shape, "text")]
                 content = "\n".join(lines)
                 if content.strip():
-                    segments.append({"slide_num": i + 1, "text": content})
+                    segments_data.append({"slide_num": i + 1, "text": content})
 
-        if not segments:
+        if not segments_data:
             raise ValueError("No readable slides found")
 
-        total_steps = len(segments)
-        db.query(LectureProcessing).filter(LectureProcessing.id == processing_id).update({"progress": 10})
-        db.commit()
-
-        # ---------- 2. Extract concepts per slide ----------
-        concept_info = defaultdict(lambda: {
-            "slide_indices": [], "slide_nums": [], "summaries": [], "contents": []
-        })
-
-        for idx, seg in enumerate(segments):
-            text = seg["text"]
-            try:
-                prompt = (
-                    "Extract 5–20 important, specific technical concepts/terms from this lecture slide. "
-                    "Each concept should be 1–5 words. Avoid generic terms like 'example', 'diagram', 'summary'. "
-                    "Focus on core topics the instructor is teaching.\n\n"
-                    f"Slide {seg['slide_num']}:\n{text[:1500]}"
-                )
-                raw = str(llm.complete(prompt))
-                print(f"[LLM RAW CONCEPTS] Slide {idx}: {raw}")
-
-                candidates = [
-                    clean_title(re.sub(r'^[\*\-\d\.\)]+\s*', '', line).strip())
-                    for line in raw.splitlines() if line.strip()
-                ]
-                concepts = [c for c in candidates if c and is_good_keyword(c) and len(c.split()) <= 5]
-
-                if not concepts and text.strip():
-                    fallback = clean_title(text.split("\n", 1)[0])
-                    if fallback and is_good_keyword(fallback):
-                        concepts = [fallback]
-
-            except Exception as e:
-                print(f"[Concept extraction error] {e}")
-                concepts = ["Unknown Concept"]
-
-            for concept in concepts:
-                info = concept_info[concept]
-                info["slide_indices"].append(idx)
-                info["slide_nums"].append(seg.get("slide_num"))
-                info["contents"].append(text[:1000])
-                try:
-                    sum_prompt = f"In 1–2 sentences, explain '{concept}' as taught in this slide:\n{text[:1000]}"
-                    summary = str(llm.complete(sum_prompt)).strip()
-                    info["summaries"].append(summary)
-                except:
-                    info["summaries"].append("")
-
-            main_concept = concepts[0] if concepts else f"Slide {seg['slide_num']}"
-            seg_db = Segment(
+        # Save Segments to DB (CRITICAL FOR QUIZZES & PREVIEW)
+        print("[PROCESS] Saving segments to DB...")
+        for seg in segments_data:
+            new_seg = Segment(
                 id=str(uuid.uuid4()),
                 upload_id=upload_id,
                 course_id=course_id,
                 week=week,
-                segment_index=idx,
-                title=main_concept,
-                content=text,
-                keywords=", ".join(concepts),
-                summary=" | ".join(set(info["summaries"][-3:])) if info["summaries"] else ""
+                segment_index=seg["slide_num"],
+                title=f"Slide {seg['slide_num']}", # Will update later
+                content=seg["text"],
+                keywords="", # Will populate via graph mapping below
+                summary=""
             )
-            db.add(seg_db)
+            db.add(new_seg)
+        db.commit()
 
-            percent = 10 + int((idx + 1) / total_steps * 70)
-            db.query(LectureProcessing).filter(LectureProcessing.id == processing_id).update({"progress": percent})
-            db.commit()
+        # Prepare context for Graph LLM (Limit to ~30k chars)
+        full_text = "\n\n".join([f"--- Slide {s['slide_num']} ---\n{s['text']}" for s in segments_data])[:30000]
 
-        # ---------- 3. Build clean node list ----------
-        kg_nodes = []
-        for concept, info in concept_info.items():
-            kg_nodes.append({
-                "id": normalize_id(concept),
-                "label": concept,
-                "count": len(info["slide_indices"]),
-                "slide_nums": sorted(set(info["slide_nums"])),
-                "summary": " ".join(set(info["summaries"]))[:1000],
-                "contents": ""
-            })
+        # ---------- 2. GENERATE GRAPH (Hierarchy + Summaries) ----------
+        print("[KG LOGIC] Generating graph...")
+        db.query(LectureProcessing).filter(LectureProcessing.id == processing_id).update({"progress": 50})
+        db.commit()
+        
+        prompt = f"""
+        You are an expert computer science instructor. Analyze the following lecture slides from "{file_name}".
+        
+        GOAL: Build a hierarchical concept map and extract metadata.
+        
+        STEP 1: Identify the SINGLE main topic (e.g., "Stacks").
+        STEP 2: Identify sub-concepts (nodes) and their parent-child relationships (edges).
+        STEP 3: Write a 1-sentence definition (summary) for each concept.
+        STEP 4: For each concept, list the "slide_numbers" where it is explicitly discussed (look for "--- Slide X ---").
 
-        print(f"[DEDUP KG] Final unique concepts: {len(kg_nodes)}")
+        Return valid JSON:
+        {{
+            "main_topic": "The single overarching topic",
+            "nodes": [
+                {{ 
+                    "id": "Concept Name", 
+                    "label": "Display Label", 
+                    "summary": "Definition...", 
+                    "slide_nums": [1, 3] 
+                }}
+            ],
+            "edges": [
+                {{ "source": "Parent ID", "target": "Child ID", "relation": "..." }}
+            ]
+        }}
 
-        # ---------- 4. Generate CORRECT hierarchical edges (PARENT → CHILD) ----------
-        print("[GENERATING HIERARCHY] Asking Gemini for correct top-down hierarchy...")
-        concept_list = "\n".join([
-            f"- {n['label']} (mentioned {n['count']} times, slides {n['slide_nums']})"
-            for n in sorted(kg_nodes, key=lambda x: -x['count'])[:80]
-        ])
+        RULES:
+        - "main_topic" is the root.
+        - All nodes must connect to the tree.
+        - slide_nums must be integers found in the text.
 
-        hierarchy_prompt = f"""
-You are an expert computer science professor building a knowledge graph for students.
+        Context:
+        {full_text}
+        """
 
-Here are the concepts extracted from the lecture:
-
-{concept_list}
-
-Create a clean, top-down hierarchy where:
-- General concepts are parents
-- Specific concepts are children
-- Direction is always PARENT → CHILD (e.g., "Queue" → "Priority Queue", not the reverse)
-- Use realistic relations like: "includes", "has type", "uses", "implemented with", "has operation"
-
-Return ONLY valid JSON in this exact format:
-{{
-  "edges": [
-    {{"source": "Data Structure", "target": "Queue", "relation": "includes"}},
-    {{"source": "Queue", "target": "Priority Queue", "relation": "has type"}},
-    {{"source": "Priority Queue", "target": "Heap", "relation": "implemented with"}}
-  ]
-}}
-
-Rules:
-- source = parent (more general)
-- target = child (more specific)
-- Only use concepts from the list above
-- No cycles
-- Prefer depth over width
-- Maximum 50 edges
-
-Return only the JSON.
-"""
-
+        response = llm.complete(prompt)
+        cleaned_text = str(response).replace("```json", "").replace("```", "").strip()
+        
         try:
-            response = str(llm.complete(hierarchy_prompt))
-            print(f"[GEMINI HIERARCHY RAW]: {response}")
+            data = json.loads(cleaned_text)
+        except:
+            # Fallback cleanup if JSON is messy
+            start = cleaned_text.find("{")
+            end = cleaned_text.rfind("}") + 1
+            if start != -1 and end != 0:
+                data = json.loads(cleaned_text[start:end])
+            else:
+                raise ValueError("LLM returned invalid JSON")
 
-            # Clean JSON from Gemini response
-            json_str = response.strip()
-            if json_str.startswith("```json"):
-                json_str = json_str[7:]
-            if json_str.endswith("```"):
-                json_str = json_str[:-3]
-            json_str = json_str.strip()
+        # ---------- 3. Process & Save Graph ----------
+        main_topic = data.get("main_topic", file_name)
+        raw_nodes = data.get("nodes", [])
+        raw_edges = data.get("edges", [])
 
-            hierarchy_json = json.loads(json_str)
-            gemini_edges = hierarchy_json.get("edges", [])
+        print(f"[KG LOGIC] Main Topic: {main_topic}")
 
-            # FINAL EDGES: Clean and normalize
-            new_edges = []
-            seen = set()
-            for e in gemini_edges:
-                src = str(e.get("source", "")).strip()
-                tgt = str(e.get("target", "")).strip()
-                rel = str(e.get("relation", "related to")).strip()
+        # Fix Hierarchy (Using your existing helper)
+        final_nodes, final_edges = compute_levels(raw_nodes, raw_edges, explicit_root=main_topic)
 
-                if not src or not tgt or src == tgt:
-                    continue
+        # --- RESTORE CONTENT CONTEXT (Crucial for Quiz Generation) ---
+        slide_text_map = {s["slide_num"]: s["text"] for s in segments_data}
 
-                src_id = src.replace(" ", "_")[:50]
-                tgt_id = tgt.replace(" ", "_")[:50]
+        for node in final_nodes:
+            # 1. Gather text from all slides where this concept appears
+            s_nums = node.get("slide_nums", [])
+            gathered_text = []
+            
+            # Ensure s_nums is a list of ints
+            if isinstance(s_nums, (int, str)): s_nums = [int(s_nums)]
+            
+            for num in s_nums:
+                if num in slide_text_map:
+                    gathered_text.append(slide_text_map[num])
+            
+            # 2. Save content context to node (Limit to 1500 chars)
+            node["contents"] = "\n...\n".join(gathered_text)[:1500]
+            
+            # 3. Update Segment Keywords (For Search)
+            if s_nums:
+                label_safe = node.get("label", "").replace("'", "''")
+                
+                # --- FIX: Dynamically build placeholders for IN clause ---
+                placeholders = ",".join([":s" + str(i) for i in range(len(s_nums))])
+                params = {"c": course_id, "w": week}
+                
+                # Add individual params for the IN clause
+                for i, num in enumerate(s_nums):
+                    params[f"s{i}"] = num
+                
+                query = f"""
+                    UPDATE segments 
+                    SET keywords = keywords || '{label_safe}, ' 
+                    WHERE course_id=:c AND week=:w AND segment_index IN ({placeholders})
+                """
+                
+                db.execute(sql_text(query), params)
+                
+                # Update Segment Title (First slide of concept gets the concept name)
+                first_slide = s_nums[0]
+                db.execute(
+                    sql_text("UPDATE segments SET title = :t WHERE course_id=:c AND week=:w AND segment_index=:i AND title LIKE 'Slide %'"),
+                    {"t": node["label"], "c": course_id, "w": week, "i": first_slide}
+                )
 
-                edge_key = (src_id, tgt_id)
-                if edge_key in seen:
-                    continue
-                seen.add(edge_key)
+                
+                # Update Segment Title (First slide of concept gets the concept name)
+                first_slide = s_nums[0]
+                db.execute(
+                    sql_text("UPDATE segments SET title = :t WHERE course_id=:c AND week=:w AND segment_index=:i AND title LIKE 'Slide %'"),
+                    {"t": node["label"], "c": course_id, "w": week, "i": first_slide}
+                )
+        
+        db.commit()
 
-                new_edges.append({
-                    "source": normalize_id(e["source"]),
-                    "target": normalize_id(e["target"]),
-                    "relation": rel
-                })
-
-            print(f"[HIERARCHY EDGES] Generated {len(new_edges)} correct parent→child edges")
-
-        except Exception as e:
-            print(f"[Hierarchy failed] {e}, using fallback")
-            new_edges = []  # or your old co-occurrence method
-
-        # ---------- 5. Save KG with CORRECT DIRECTION ----------
-        all_nodes = kg_nodes                     #  list of concept dicts
-        all_edges = new_edges                     # parent → child edges from Gemini
-
-        all_nodes = compute_levels(all_nodes, all_edges)
-
-        # Optional: give roots a much higher visual weight
-        for node in all_nodes:
-            if node.get("isRoot"):
-                node["count"] = (node.get("count", 0) or 0) + 20
-
-        existing = db.execute(
-            sql_text("SELECT node_data, edge_data, id FROM knowledge_graph WHERE course_id=:c AND week=:w"),
+        # ---------- 4. Save Knowledge Graph ----------
+        existing_kg = db.execute(
+            sql_text("SELECT id FROM knowledge_graph WHERE course_id=:c AND week=:w"),
             {"c": course_id, "w": week}
         ).fetchone()
 
-        if existing:
-            existing_nodes = json.loads(existing[0]) if existing[0] else []
-            existing_edges = json.loads(existing[1]) if existing[1] else []
-            seen = {(e["source"], e["target"]) for e in existing_edges}
-            all_edges = existing_edges + [e for e in all_edges if (e["source"], e["target"]) not in seen]
-            kg_id = existing[2]
+        node_json = json.dumps(final_nodes)
+        edge_json = json.dumps(final_edges)
+
+        if existing_kg:
             db.execute(
                 sql_text("UPDATE knowledge_graph SET node_data=:n, edge_data=:e WHERE id=:id"),
-                {"n": json.dumps(all_nodes), "e": json.dumps(all_edges), "id": kg_id}
+                {"n": node_json, "e": edge_json, "id": existing_kg[0]}
             )
         else:
-            kg_id = str(uuid.uuid4())
             db.execute(
-                sql_text("""
-                    INSERT INTO knowledge_graph (id, course_id, week, node_data, edge_data)
-                    VALUES (:id, :c, :w, :n, :e)
-                """),
-                {"id": kg_id, "c": course_id, "w": week, "n": json.dumps(all_nodes), "e": json.dumps(all_edges)}
+                sql_text("INSERT INTO knowledge_graph (id, course_id, week, node_data, edge_data) VALUES (:id, :c, :w, :n, :e)"),
+                {"id": str(uuid.uuid4()), "c": course_id, "w": week, "n": node_json, "e": edge_json}
             )
 
-        db.commit()
-
+        # Finish
         db.query(LectureProcessing).filter(LectureProcessing.id == processing_id).update({
             "status": "done", "progress": 100
         })
         db.commit()
-
-        print(f"[PROCESSING COMPLETE] Course: {course_id}, Week: {week}")
-        print(f"   → {len(all_nodes)} concepts, {len(all_edges)} CORRECT hierarchical relations saved")
+        print(f"[KG COMPLETE] Saved {len(final_nodes)} nodes with content context.")
 
     except Exception as e:
-        print(f"[FATAL ERROR] {str(e)}")
+        print(f"[KG ERROR] {str(e)}")
+        traceback.print_exc()
         db.query(LectureProcessing).filter(LectureProcessing.id == processing_id).update({
             "status": "error", "progress": 0, "error_message": str(e)[:500]
         })
@@ -588,35 +551,90 @@ Return only the JSON.
     finally:
         db.close()
 
-def compute_levels(nodes, edges):
+
+def compute_levels(nodes, edges, explicit_root=None):
+    """
+    Forces a strict hierarchy where 'explicit_root' is Level 0.
+    Connects any disconnected nodes to the root to prevent 'islands'.
+    """
     node_map = {n["id"]: n for n in nodes}
-    incoming = defaultdict(int)
-    children = defaultdict(list)
+    
+    # 1. Ensure the Explicit Root exists in the node list
+    if explicit_root:
+        if explicit_root not in node_map:
+            root_node = {"id": explicit_root, "label": explicit_root, "isRoot": True}
+            nodes.append(root_node)
+            node_map[explicit_root] = root_node
+        else:
+            # Force existing node to be root
+            node_map[explicit_root]["isRoot"] = True
+
+    # 2. Build Adjacency List
+    adj = defaultdict(list)
     for e in edges:
-        incoming[e["target"]] += 1
-        children[e["source"]].append(e["target"])
+        adj[e["source"]].append(e["target"])
+
+    # 3. BFS to Assign Levels from Root
+    levels = {node_id: -1 for node_id in node_map} # -1 means unvisited
     
-    # Roots = nodes with no incoming edges
-    roots = [nid for nid in node_map if incoming.get(nid, 0) == 0]
-    
-    level_map = {}
-    queue = deque([(root, 0) for root in roots])
-    
+    # Start BFS from the explicit root
+    queue = deque()
+    if explicit_root and explicit_root in node_map:
+        queue.append((explicit_root, 0))
+    else:
+        # Fallback: Find topological roots (nodes with no incoming edges)
+        incoming = defaultdict(int)
+        for e in edges: incoming[e["target"]] += 1
+        topo_roots = [n["id"] for n in nodes if incoming[n["id"]] == 0]
+        for r in topo_roots: queue.append((r, 0))
+
+    visited = set()
+    if explicit_root: visited.add(explicit_root)
+
     while queue:
-        node_id, level = queue.popleft()
-        level_map[node_id] = level
-        for child in children[node_id]:
-            if child not in level_map:
-                level_map[child] = level + 1
-                queue.append((child, level + 1))
+        curr, depth = queue.popleft()
+        levels[curr] = depth
+        
+        for child in adj[curr]:
+            if child not in visited:
+                visited.add(child)
+                queue.append((child, depth + 1))
     
-    # Assign level and isRoot to every node
+    # 4. Handle Disconnected Nodes (Orphans)
+    # Force connect any unvisited nodes to the Root
+    new_edges = []
+    if explicit_root:
+        for node in nodes:
+            node_id = node["id"]
+            if node_id != explicit_root and levels[node_id] == -1:
+                # Create a "Related" edge so it appears in the graph
+                new_edges.append({
+                    "source": explicit_root,
+                    "target": node_id,
+                    "relation": "related concept"
+                })
+                # Set level to 1 (direct child of root)
+                levels[node_id] = 1
+                node["isRoot"] = False 
+
+    # 5. Finalize Node Objects
     for node in nodes:
-        node["level"] = level_map.get(node["id"], 0)
-        node["isRoot"] = node["id"] in roots
+        node["level"] = levels.get(node["id"], 1)
+        node["isRoot"] = (node["id"] == explicit_root) if explicit_root else (node.get("level") == 0)
+        
+        # Optional: Add type for frontend styling
+        if node["isRoot"]:
+            node["type"] = "root"
+        else:
+            node["type"] = "concept"
+
+    # Combine original edges with new "rescue" edges
+    final_edges = edges + new_edges
     
-    # Sort so most important nodes appear first
-    return sorted(nodes, key=lambda x: (-x.get("count", 0), x.get("level", 0)))
+    # Sort nodes so Root is always first (helps some frontend parsers)
+    nodes.sort(key=lambda x: x["level"])
+    
+    return nodes, final_edges
 
 
 def extract_mcqs_from_response(resp):
@@ -1917,3 +1935,106 @@ async def check_answer_mcq(
             response["hint"] = "No more retries."
 
     return response
+
+
+async def generate_knowledge_graph(course_id: str, week: int, processing_id: str, db: Session):
+    """
+    Analyzes lecture slides to build a hierarchical concept map.
+    Forces 'main_topic' to be the root node.
+    """
+    try:
+        print(f"[KG START] Generating graph for Course: {course_id}, Week: {week}")
+        
+        # Get upload record for status updates
+        upload_record = db.query(LectureProcessing).filter(LectureProcessing.id == processing_id).first()
+
+        # 1. Fetch Text Content
+        segments = db.query(Segment).filter(
+            Segment.course_id == course_id, 
+            Segment.week == week
+        ).all()
+        
+        if not segments:
+            print("[KG SKIP] No segments found.")
+            return
+
+        full_text = "\n".join([s.content for s in segments if s.content])[:15000]
+        file_name = upload_record.file_name if upload_record else "Lecture Topic"
+
+        # 2. Call LLM
+        model = genai.GenerativeModel("gemini-2.5-flash")
+        
+        prompt = f"""
+        You are an expert computer science instructor. Analyze the following lecture content from "{file_name}".
+        
+        STEP 1: Identify the SINGLE main topic (e.g., "Stacks", "Queue").
+        STEP 2: Identify sub-concepts and their relationships.
+
+        Return valid JSON:
+        {{
+            "main_topic": "The single overarching topic string",
+            "nodes": [ {{"id": "Concept Name", "label": "Display Label"}} ],
+            "edges": [ {{"source": "Parent ID", "target": "Child ID", "relation": "..."}} ]
+        }}
+
+        RULES:
+        - "main_topic" is the absolute root.
+        - All concepts must connect back to "main_topic".
+        - No disconnected islands.
+
+        Context:
+        {full_text}
+        """
+
+        response = model.generate_content(prompt)
+        # robust json cleaning
+        cleaned_text = response.text.replace("```json", "").replace("```", "").strip()
+        data = json.loads(cleaned_text)
+
+        # 3. Process Hierarchy
+        main_topic = data.get("main_topic", file_name.replace(".pdf", ""))
+        raw_nodes = data.get("nodes", [])
+        raw_edges = data.get("edges", [])
+
+        print(f"[KG LOGIC] Main Topic: {main_topic}")
+
+        # Use the compute_levels helper we defined earlier
+        final_nodes, final_edges = compute_levels(raw_nodes, raw_edges, explicit_root=main_topic)
+
+        # 4. Save to DB
+        existing_kg = db.query(KnowledgeGraphBase).filter(
+            KnowledgeGraphBase.course_id == course_id,
+            KnowledgeGraphBase.week == week
+        ).first()
+
+        node_json = json.dumps(final_nodes)
+        edge_json = json.dumps(final_edges)
+
+        if existing_kg:
+            existing_kg.node_data = node_json
+            existing_kg.edge_data = edge_json
+        else:
+            new_kg = KnowledgeGraphBase(
+                id=str(uuid.uuid4()),
+                course_id=course_id,
+                week=week,
+                node_data=node_json,
+                edge_data=edge_json
+            )
+            db.add(new_kg)
+
+        # 5. Mark Processing Complete
+        if upload_record:
+            upload_record.status = "done"
+            upload_record.progress = 100
+        
+        db.commit()
+        print("[KG SUCCESS] Graph saved.")
+
+    except Exception as e:
+        print(f"[KG ERROR] {str(e)}")
+        traceback.print_exc()
+        if upload_record:
+            upload_record.status = "error"
+            upload_record.error_message = str(e)
+            db.commit()
