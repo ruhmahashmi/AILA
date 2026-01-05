@@ -106,13 +106,25 @@ function MCQCard({ q, i, knowledgeGraph, loadPreview }) {
               if (!Array.isArray(safeOptions) || safeOptions.length === 0) return <p className="text-red-400 text-sm italic">No options found.</p>;
 
               return safeOptions.map((opt, j) => {
-                const isCorrect = opt === q.answer;
+                // FIXED: Robust check for correct answer
+                const optionStr = String(opt).trim();
+                const answerStr = String(q.answer).trim();
                 
+                // If the option matches the answer, mark it correct.
+                // Or if the answer is just a letter "A", "B", etc., check index.
+                let isCorrect = optionStr === answerStr;
+                
+                // Fallback for "Answer: A" style if needed (rare with your backend but safe to add)
+                if (!isCorrect && answerStr.length === 1) {
+                    const letters = ['A','B','C','D'];
+                    if (letters[j] === answerStr) isCorrect = true;
+                }
+
                 return (
                   <div key={j} className={`flex items-start gap-3 p-3 rounded-lg border text-sm transition-all ${
                     isCorrect 
                       ? "bg-green-50 border-green-200 ring-1 ring-green-100" // Highlight Correct Answer
-                      : "bg-white border-gray-100 text-gray-600"
+                      : "bg-white border-gray-100 text-gray-600 opacity-70"
                   }`}>
                     <div className={`mt-0.5 w-4 h-4 rounded-full border flex items-center justify-center flex-shrink-0 ${
                       isCorrect ? "bg-green-500 border-green-500 text-white" : "border-gray-300 bg-gray-50"
@@ -145,6 +157,7 @@ export default function CourseWeekPage({ params }) {
   // --- STATE ---
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [knowledgeGraph, setKnowledgeGraph] = useState({ nodes: [], edges: [] });
+  // eslint-disable-next-line no-unused-vars
   const [kgError, setKgError] = useState(null);
   const [isLoadingKG, setIsLoadingKG] = useState(true);
 
@@ -290,7 +303,6 @@ export default function CourseWeekPage({ params }) {
   const activeConcept = knowledgeGraph.nodes?.find(n => n.id === activeConceptId) || null;
   const activeQuiz = quizzes.find(q => q.id === selectedQuizId);
   
-  // -- Calculate Counts for Header --
   const allMcqs = quizPreview?.mcqs || [];
   const easyCount = allMcqs.filter(m => m.difficulty === "Easy").length;
   const mediumCount = allMcqs.filter(m => !m.difficulty || m.difficulty === "Medium").length;
@@ -335,37 +347,56 @@ export default function CourseWeekPage({ params }) {
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-[1600px] mx-auto p-6 space-y-8 pb-20">
           
-          {/* HEADER */}
-          <div>
-            <h1 className="text-3xl font-bold text-gray-900">
-              Week {weekNumber} — Lecture Dashboard
-            </h1>
-            <p className="text-gray-600 mt-1">Course ID: {courseId}</p>
-          </div>
-
-          {/* UPLOAD SECTION */}
-          <div className="bg-white rounded-2xl shadow-md border border-gray-200 p-6">
-            <div className="flex items-center justify-between mb-4">
-              <div>
-                <h2 className="text-xl font-semibold">Upload Lecture Slides</h2>
-                <p className="text-sm text-gray-500 mt-1">
-                  PDF or PPTX • This powers your concept map & quizzes
-                </p>
-              </div>
-              <UploadLectureForm
-                courseId={courseId}
-                weekNumber={weekNumber}
-                onUploadComplete={handleProcessingStarted}
-              />
+          {/* FIXED HEADER: Improved Position */}
+          <div className="flex justify-between items-end border-b border-gray-200 pb-4">
+            <div>
+               <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-3">
+                 Week {weekNumber}
+                 <span className="text-xl font-normal text-gray-400">|</span>
+                 <span className="text-xl font-medium text-gray-600">Instructor Dashboard</span>
+               </h1>
+               <p className="text-sm text-gray-400 mt-1 font-mono">ID: {courseId}</p>
             </div>
           </div>
 
-          <UploadedFilesList
-            courseId={courseId}
-            week={weekNumber}
-            onReload={fetchKnowledgeGraph}
-          />
+            {/* TWO-COLUMN LAYOUT: UPLOAD & FILES LIST (EQUAL HEIGHT) */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch">
+            
+            {/* LEFT: Upload Form (Stretched to fill height) */}
+            <div className="h-full">
+              <div className="bg-white rounded-2xl shadow-md border border-gray-200 p-6 h-full flex flex-col justify-center min-h-[200px]">
+                <div className="flex items-center justify-between mb-2">
+                  <div>
+                    <h2 className="text-xl font-semibold">Upload Lecture Slides</h2>
+                    <p className="text-sm text-gray-500 mt-1">
+                      PDF or PPTX • Powers your concept map
+                    </p>
+                  </div>
+                </div>
+                <div className="mt-4 flex-1 flex flex-col justify-center">
+                   <UploadLectureForm
+                    courseId={courseId}
+                    weekNumber={weekNumber}
+                    onUploadComplete={handleProcessingStarted}
+                  />
+                </div>
+              </div>
+            </div>
 
+            {/* RIGHT: File List (Stretched to fill height) */}
+            <div className="h-full">
+               <div className="bg-white rounded-2xl shadow-md border border-gray-200 h-full min-h-[200px] flex flex-col">
+                  {/* Pass className="h-full" to your UploadedFilesList or wrap it like this */}
+                  <UploadedFilesList
+                    courseId={courseId}
+                    week={weekNumber}
+                    onReload={fetchKnowledgeGraph}
+                  />
+               </div>
+            </div>
+          </div>
+
+          {/* Processing Status */}
           {processingFiles.length > 0 && (
             <div className="bg-blue-50 border border-blue-200 rounded-xl p-5 mb-6">
               <h3 className="font-semibold text-blue-900 mb-3">Processing Files...</h3>
@@ -378,33 +409,22 @@ export default function CourseWeekPage({ params }) {
               ))}
             </div>
           )}
-
-          {/* KG DEBUG */}
-          <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-4 text-sm flex items-center justify-between">
-            <div className="text-yellow-900 font-mono">
-              <strong>KG Debug:</strong> nodes={knowledgeGraph.nodes.length} edges={knowledgeGraph.edges.length} loading={String(isLoadingKG)}
-              {kgError && <span className="ml-2 text-red-600">Error: {String(kgError)}</span>}
-            </div>
-            <button
-              onClick={fetchKnowledgeGraph}
-              className="text-xs px-3 py-1.5 rounded bg-white border border-yellow-300 hover:bg-yellow-100 text-yellow-900"
-            >
-              Refresh KG
-            </button>
-          </div>
-
+          
           {/* CONCEPT GRAPH */}
           <div className="bg-white rounded-2xl shadow-lg border border-gray-200 overflow-hidden relative">
              <div className="p-4 bg-gradient-to-r from-blue-50 to-indigo-50 border-b flex justify-between items-center">
                 <h3 className="font-semibold text-gray-800">🧠 Concept Map</h3>
-                <span className="text-xs text-gray-500 bg-white px-2 py-1 rounded border">Interactive</span>
+                <div className="flex items-center gap-2">
+                   {isLoadingKG && <span className="text-xs text-blue-500 animate-pulse">Updating...</span>}
+                   <span className="text-xs text-gray-500 bg-white px-2 py-1 rounded border">Interactive</span>
+                </div>
              </div>
              <div className="h-[500px]">
                 <ConceptGraph nodes={knowledgeGraph.nodes} edges={knowledgeGraph.edges} onSelect={setActiveConceptId} />
              </div>
           </div>
 
-          {/* SPLIT VIEW: Concept Details + Quiz Creator */}
+          {/* REST OF PAGE (Split Views for Quiz etc) */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 h-[700px]">
              {/* LEFT: Concept Details */}
              <div className="bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col overflow-hidden">
@@ -430,7 +450,7 @@ export default function CourseWeekPage({ params }) {
              </div>
           </div>
 
-          {/* SPLIT VIEW: Quizzes List + Question Bank */}
+          {/* QUIZ MANAGER SECTION */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start pt-4 border-t border-gray-200 min-h-[600px]">
              
              {/* LEFT COLUMN: Quiz List (4 cols) */}
@@ -447,8 +467,6 @@ export default function CourseWeekPage({ params }) {
                    const isSelected = selectedQuizId === q.id;
                    return (
                      <div key={q.id} className={`rounded-xl border-2 transition-all overflow-hidden bg-white ${isSelected ? "border-blue-500 shadow-md ring-2 ring-blue-50" : "border-gray-200 hover:border-blue-300"}`}>
-                        
-                        {/* Quiz Header */}
                         <div 
                           onClick={() => {
                              setSelectedQuizId(q.id);
@@ -464,8 +482,6 @@ export default function CourseWeekPage({ params }) {
                              Concepts: {(q.concept_ids || q.conceptids || []).length}
                            </p>
                         </div>
-
-                        {/* Settings Accordion */}
                         {isSelected && expandedQuizSettingsId === q.id && (
                            <div className="border-t border-gray-100 bg-gray-50 p-4 animate-in slide-in-from-top-2 duration-200">
                               <h4 className="text-xs font-bold text-gray-400 uppercase mb-2">Settings</h4>
@@ -492,23 +508,11 @@ export default function CourseWeekPage({ params }) {
                                {activeQuiz?.name}
                              </span>
                            </h2>
-                           {/* Detailed Counts */}
                            <p className="text-xs text-gray-500 mt-1 font-medium">{questionCountLabel}</p>
-                           
-                           {/* Concept Chips Display */}
-                           <div className="flex flex-wrap gap-1 mt-2">
-                             {(activeQuiz?.concept_ids || []).map(cid => (
-                               <span key={cid} className="px-2 py-0.5 rounded-full text-[10px] bg-gray-100 text-gray-600 border border-gray-200">
-                                 {knowledgeGraph.nodes.find(n => n.id === cid)?.label || cid}
-                               </span>
-                             ))}
-                           </div>
                          </div>
                          
-                         {/* Filter Buttons */}
                          <div className="flex bg-gray-200 p-1 rounded-lg self-start">
                             {["All", "Easy", "Medium", "Hard"].map(lvl => {
-                              // Dynamic count for filter buttons
                               let count = 0;
                               if (lvl === "All") count = totalCount;
                               else if (lvl === "Easy") count = easyCount;
@@ -527,8 +531,7 @@ export default function CourseWeekPage({ params }) {
                             })}
                          </div>
                        </div>
-
-                       {/* Action Buttons */}
+                       
                        <div className="flex gap-3 pt-2 border-t border-gray-100">
                           <button 
                             onClick={generateQuizMCQs}
@@ -546,7 +549,6 @@ export default function CourseWeekPage({ params }) {
                        </div>
                     </div>
 
-                    {/* Question List */}
                     <div className="p-6 bg-gray-50/50 flex-1 overflow-y-auto custom-scrollbar">
                        {previewError && <div className="bg-red-50 text-red-600 p-4 rounded mb-4 text-sm border border-red-200">{previewError}</div>}
                        
@@ -562,9 +564,6 @@ export default function CourseWeekPage({ params }) {
                                <div className="text-5xl mb-4 opacity-20">📝</div>
                                <p className="text-lg font-medium text-gray-500">
                                   {allMcqs.length > 0 ? `No ${filterDifficulty} questions found.` : "No questions generated yet."}
-                               </p>
-                               <p className="text-sm text-gray-400 mt-1">
-                                  {allMcqs.length > 0 ? "Try changing the filter." : "Click 'Generate / Add More Questions' above to start."}
                                </p>
                             </div>
                           )
@@ -582,23 +581,10 @@ export default function CourseWeekPage({ params }) {
                  <div className="h-full flex flex-col items-center justify-center bg-gray-50 rounded-xl border-2 border-dashed border-gray-200 text-gray-400">
                     <span className="text-4xl mb-4">👈</span>
                     <p className="font-medium text-lg">Select a quiz from the left</p>
-                    <p className="text-sm">to manage settings and review questions.</p>
                  </div>
                )}
              </div>
-
           </div>
-
-          {/* Stats Debug */}
-          {quizStats && (
-             <div className="mt-8 pt-4 border-t border-gray-200">
-                <details className="text-xs text-gray-400 cursor-pointer">
-                   <summary>Debug Stats</summary>
-                   <pre className="mt-2 bg-gray-100 p-4 rounded overflow-x-auto">{JSON.stringify(quizStats, null, 2)}</pre>
-                </details>
-             </div>
-          )}
-
         </div>
       </div>
     </div>
