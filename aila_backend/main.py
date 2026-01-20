@@ -22,6 +22,7 @@ from typing import List
 from collections import deque, defaultdict
 from datetime import datetime
 from typing import Optional
+from models import LectureProcessing, KnowledgeGraph
 import asyncio
 import fitz  # PyMuPDF
 import hashlib
@@ -105,8 +106,8 @@ class Segment(Base):
 class MCQ(Base):
     __tablename__ = "mcqs"
     id = Column(String(36), primary_key=True, index=True)
-    quiz_id = Column(String(36), ForeignKey("quizzes.id"), nullable=True)  # NEW
-    concept_id = Column(String(255), nullable=True)                         # NEW
+    quiz_id = Column(String(36), ForeignKey("quizzes.id"), nullable=True)  
+    concept_id = Column(String(255), nullable=True)                         
     segment_id = Column(String(36), ForeignKey("segments.id"), nullable=True)
 
     question = Column(Text, nullable=False)
@@ -344,7 +345,6 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
     from sqlalchemy import text as sql_text # Ensure this import exists
 
     db = SessionLocal()
-    # Use Pro model for better reasoning capacity
     llm = Gemini(model="models/gemini-2.5-flash") 
 
     try:
@@ -384,7 +384,7 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
                 course_id=course_id,
                 week=week,
                 segment_index=seg["slide_num"],
-                title=f"Slide {seg['slide_num']}", # Will update later
+                title=f"Slide {seg['slide_num']}", 
                 content=seg["text"],
                 keywords="", # Will populate via graph mapping below
                 summary=""
@@ -830,7 +830,6 @@ async def generate_mcqs(payload: MCQConceptModel = Body(...)):
         return {"mcqs": [{"question": "Sample fallback MCQ: LLM Error, please try again.", "options": ["A", "B", "C", "D"], "answer": "A"}]}
     except Exception as ex:
         print("[MCQ GENERATION ERROR]", ex)
-        # Do NOT refer to model_output here!
         return {"mcqs": [{
             "question": "Sample fallback MCQ: LLM Error, please try again.",
             "options": ["A", "B", "C", "D"],
@@ -1092,6 +1091,22 @@ async def debug_segment(segment_id: str, db: Session = Depends(get_db)):
         "has_summary": bool(s.summary and s.summary.strip())
     }
 
+@app.delete("/api/upload/{upload_id}")
+def delete_upload(upload_id: str, db: Session = Depends(get_db)):
+    record = db.query(LectureProcessing).filter(LectureProcessing.id == upload_id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Upload not found")
+    
+    # DELETE GRAPH LOGIC
+    db.query(KnowledgeGraph).filter(
+        KnowledgeGraph.course_id == record.course_id,
+        KnowledgeGraph.week == record.week
+    ).delete()
+    
+    db.delete(record)
+    db.commit()
+    return {"status": "deleted"}
+
 # Add WebSocket endpoint
 @app.websocket("/ws/{course_id}/{week}")
 async def websocket_endpoint(websocket: WebSocket, course_id: str, week: int):
@@ -1128,12 +1143,12 @@ async def create_quiz(request: QuizCreate, db: Session = Depends(get_db)):
 
 @app.post("/api/quizzes")
 async def create_quiz(payload: dict, db: Session = Depends(get_db)):
-    print("QUIZ CREATE DEBUG", payload)  # Log payload
+    print("QUIZ CREATE DEBUG", payload)  
     quiz_id = str(uuid.uuid4())
     new_quiz = Quiz(
         id=quiz_id,
         name=payload.get("name", "New Quiz"),
-        course_id=payload["course_id"],  # Note: use course_id per schema
+        course_id=payload["course_id"],  
         week=payload["week"],
         concept_ids=payload["concept_ids"],  # List[str]
         instructor_id=payload.get("instructor_id", "unknown")

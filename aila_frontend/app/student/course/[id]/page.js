@@ -15,4 +15,3 @@ export default function RedirectToWeek() {
 
   return <div>Redirecting to Week 1...</div>;
 }
-

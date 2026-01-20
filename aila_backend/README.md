@@ -57,7 +57,7 @@ If `DATABASE_URL` is omitted, the app defaults to a local SQLite file.
 3. Install dependencies: pip install -r requirements.txt
 4. Run the backend server: uvicorn main:app --reload
 
-5. Backend will listen on `http://localhost:8000` and auto‑create `ailastar.db` on first run.
+5. Backend will listen on `process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'` and auto‑create `ailastar.db` on first run.
 
 ## Development Notes
 

@@ -4,6 +4,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 
+// Adjust these paths if your folder structure is different
 import UploadLectureForm from "../../../../../components/UploadLectureForm";
 import ProcessingFileStatus from "../../../../../components/ProcessingFileStatus";
 import SlideViewer from "../../../../../components/SlideViewer";
@@ -26,7 +27,6 @@ async function safeJson(res) {
 
 // --- SUB-COMPONENT: MCQ CARD ---
 function MCQCard({ q, i, knowledgeGraph, loadPreview }) {
-  // State to toggle visibility of options/answer
   const [isOpen, setIsOpen] = useState(false);
 
   return (
@@ -106,15 +106,12 @@ function MCQCard({ q, i, knowledgeGraph, loadPreview }) {
               if (!Array.isArray(safeOptions) || safeOptions.length === 0) return <p className="text-red-400 text-sm italic">No options found.</p>;
 
               return safeOptions.map((opt, j) => {
-                // FIXED: Robust check for correct answer
                 const optionStr = String(opt).trim();
                 const answerStr = String(q.answer).trim();
                 
-                // If the option matches the answer, mark it correct.
-                // Or if the answer is just a letter "A", "B", etc., check index.
                 let isCorrect = optionStr === answerStr;
                 
-                // Fallback for "Answer: A" style if needed (rare with your backend but safe to add)
+                // Fallback for "Answer: A" style
                 if (!isCorrect && answerStr.length === 1) {
                     const letters = ['A','B','C','D'];
                     if (letters[j] === answerStr) isCorrect = true;
@@ -156,6 +153,7 @@ export default function CourseWeekPage({ params }) {
 
   // --- STATE ---
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [refreshTrigger, setRefreshTrigger] = useState(0); // This controls the refresh
   const [knowledgeGraph, setKnowledgeGraph] = useState({ nodes: [], edges: [] });
   // eslint-disable-next-line no-unused-vars
   const [kgError, setKgError] = useState(null);
@@ -177,10 +175,31 @@ export default function CourseWeekPage({ params }) {
   // --- FETCHERS ---
   const fetchKnowledgeGraph = useCallback(async () => {
     if (!courseId || !Number.isFinite(week)) return;
+    
+    // -------------------------------------------------------------
+    // NUCLEAR FIX: Check file count first. If 0, WIPE GRAPH.
+    // -------------------------------------------------------------
+    try {
+       const fileRes = await fetch(`${BACKEND_URL}/api/lecture-history/?course_id=${courseId}&t=${Date.now()}`);
+       const files = await fileRes.json();
+       const weekFiles = Array.isArray(files) ? files.filter(f => String(f.week) === String(week)) : [];
+
+       if (weekFiles.length === 0) {
+           console.log("NUCLEAR FIX: No files found for week. Forcing graph wipe.");
+           setKnowledgeGraph({ nodes: [], edges: [] });
+           setActiveConceptId(null);
+           setIsLoadingKG(false);
+           return; // Stop here, do not even fetch KG
+       }
+    } catch(e) {
+        console.error("File check failed, continuing to KG fetch", e);
+    }
+    // -------------------------------------------------------------
+
     setIsLoadingKG(true);
     setKgError(null);
     try {
-      const res = await fetch(`${BACKEND_URL}/api/knowledge-graph?courseid=${courseId}&week=${week}`, { cache: "no-store" });
+      const res = await fetch(`${BACKEND_URL}/api/knowledge-graph?courseid=${courseId}&week=${week}&t=${Date.now()}`, { cache: "no-store" });
       if (!res.ok) throw new Error("KG Load Failed");
       const data = await safeJson(res);
       setKnowledgeGraph({ nodes: data?.nodes || [], edges: data?.edges || [] });
@@ -279,25 +298,41 @@ export default function CourseWeekPage({ params }) {
   // Polling
   useEffect(() => {
     if (processingFiles.length === 0) return;
+
     const interval = setInterval(async () => {
-      const results = await Promise.all(processingFiles.map(async f => {
-         try {
-             const res = await fetch(`${BACKEND_URL}/api/lecture-status?processingid=${f.processingId}`);
-             const data = await safeJson(res);
-             return { ...data, processingId: f.processingId };
-         } catch { return { status: 'error', processingId: f.processingId }; }
-      }));
-      
-      const doneJobs = results.filter(r => r.status === 'done');
+      const results = await Promise.all(
+        processingFiles.map(async (f) => {
+          try {
+            const res = await fetch(
+              `${BACKEND_URL}/api/lecture-status?processing_id=${f.processingId}`
+            );
+            const data = await safeJson(res);
+            return { ...data, processingId: f.processingId };
+          } catch {
+            return { status: "error", processingId: f.processingId };
+          }
+        })
+      );
+
+      const doneJobs = results.filter((r) => r.status === "done");
+
       if (doneJobs.length > 0) {
-        fetchKnowledgeGraph();
-        fetchQuizzes();
-        setProcessingFiles(prev => prev.filter(p => !doneJobs.some(d => d.processingId === p.processingId)));
+        // 1. Remove from processing list
+        setProcessingFiles((prev) =>
+          prev.filter((p) => !doneJobs.some((d) => d.processingId === p.processingId))
+        );
+
+        // 2. Refresh immediately
+        setTimeout(() => {
+          fetchKnowledgeGraph();
+          fetchQuizzes();
+          setRefreshTrigger((prev) => prev + 1); 
+        }, 1000);
       }
     }, 3000);
+
     return () => clearInterval(interval);
   }, [processingFiles, fetchKnowledgeGraph, fetchQuizzes]);
-
 
   // --- RENDER HELPERS ---
   const activeConcept = knowledgeGraph.nodes?.find(n => n.id === activeConceptId) || null;
@@ -359,10 +394,10 @@ export default function CourseWeekPage({ params }) {
             </div>
           </div>
 
-            {/* TWO-COLUMN LAYOUT: UPLOAD & FILES LIST (EQUAL HEIGHT) */}
+            {/* TWO-COLUMN LAYOUT: UPLOAD & FILES LIST */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch">
             
-            {/* LEFT: Upload Form (Stretched to fill height) */}
+            {/* LEFT: Upload Form */}
             <div className="h-full">
               <div className="bg-white rounded-2xl shadow-md border border-gray-200 p-6 h-full flex flex-col justify-center min-h-[200px]">
                 <div className="flex items-center justify-between mb-2">
@@ -383,16 +418,21 @@ export default function CourseWeekPage({ params }) {
               </div>
             </div>
 
-            {/* RIGHT: File List (Stretched to fill height) */}
+            {/* RIGHT: File List */}
             <div className="h-full">
-               <div className="bg-white rounded-2xl shadow-md border border-gray-200 h-full min-h-[200px] flex flex-col">
-                  {/* Pass className="h-full" to your UploadedFilesList or wrap it like this */}
+              <div className="bg-white rounded-2xl shadow-md border border-gray-200 h-full min-h-[200px] flex flex-col">
                   <UploadedFilesList
+                    key={refreshTrigger} 
                     courseId={courseId}
                     week={weekNumber}
-                    onReload={fetchKnowledgeGraph}
+                    refreshTrigger={refreshTrigger}
+                    onReload={() => {
+                        fetchKnowledgeGraph();
+                        fetchQuizzes();
+                        setRefreshTrigger(prev => prev + 1);
+                    }}
                   />
-               </div>
+              </div>
             </div>
           </div>
 
@@ -412,19 +452,33 @@ export default function CourseWeekPage({ params }) {
           
           {/* CONCEPT GRAPH */}
           <div className="bg-white rounded-2xl shadow-lg border border-gray-200 overflow-hidden relative">
-             <div className="p-4 bg-gradient-to-r from-blue-50 to-indigo-50 border-b flex justify-between items-center">
-                <h3 className="font-semibold text-gray-800">🧠 Concept Map</h3>
-                <div className="flex items-center gap-2">
-                   {isLoadingKG && <span className="text-xs text-blue-500 animate-pulse">Updating...</span>}
-                   <span className="text-xs text-gray-500 bg-white px-2 py-1 rounded border">Interactive</span>
-                </div>
-             </div>
-             <div className="h-[500px]">
-                <ConceptGraph nodes={knowledgeGraph.nodes} edges={knowledgeGraph.edges} onSelect={setActiveConceptId} />
-             </div>
+              <div className="p-4 bg-gradient-to-r from-blue-50 to-indigo-50 border-b flex justify-between items-center">
+              <h3 className="font-semibold text-gray-800">🧠 Concept Map</h3>
+              <div className="flex items-center gap-2">
+                  {isLoadingKG && <span className="text-xs text-blue-500 animate-pulse">Updating...</span>}
+                  <span className="text-xs text-gray-500 bg-white px-2 py-1 rounded border">Interactive</span>
+              </div>
+              </div>
+              <div className="h-[500px]">
+                  {/* FORCE RE-MOUNT when nodes become empty */}
+                  {knowledgeGraph.nodes.length > 0 ? (
+                      <ConceptGraph 
+                          key={JSON.stringify(knowledgeGraph.nodes)} 
+                          nodes={knowledgeGraph.nodes} 
+                          edges={knowledgeGraph.edges} 
+                          onSelect={setActiveConceptId} 
+                      />
+                  ) : (
+                      <div className="flex flex-col items-center justify-center h-full text-gray-400">
+                          <span className="text-4xl mb-2">🕸️</span>
+                          <p>No concept map available.</p>
+                          <p className="text-xs">Upload slides to generate one.</p>
+                      </div>
+                  )}
+              </div>
           </div>
 
-          {/* REST OF PAGE (Split Views for Quiz etc) */}
+          {/* REST OF PAGE */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 h-[700px]">
              {/* LEFT: Concept Details */}
              <div className="bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col overflow-hidden">
@@ -453,7 +507,7 @@ export default function CourseWeekPage({ params }) {
           {/* QUIZ MANAGER SECTION */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start pt-4 border-t border-gray-200 min-h-[600px]">
              
-             {/* LEFT COLUMN: Quiz List (4 cols) */}
+             {/* LEFT COLUMN: Quiz List */}
              <div className="lg:col-span-4 h-[600px] overflow-y-auto pr-2 custom-scrollbar flex flex-col bg-gray-50 rounded-xl border border-gray-200">
                <div className="flex items-center justify-between p-4 sticky top-0 bg-gray-50 z-10 border-b border-gray-200">
                  <h2 className="text-xl font-bold text-gray-800">Your Quizzes <span className="text-gray-500 text-base font-normal">({quizzes.length})</span></h2>
@@ -494,7 +548,7 @@ export default function CourseWeekPage({ params }) {
                </div>
              </div>
 
-             {/* RIGHT COLUMN: Question Bank Review (8 cols) */}
+             {/* RIGHT COLUMN: Question Bank Review */}
              <div className="lg:col-span-8 h-[600px]">
                {selectedQuizId ? (
                  <div className="bg-white rounded-xl shadow-lg border border-gray-200 h-full flex flex-col">
