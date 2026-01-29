@@ -303,12 +303,10 @@ function MCQCard({ q, i, knowledgeGraph, loadPreview }) {
   );
 }
 
-
 export default function CourseWeekPage({ params }) {
   const { id: courseId, weekNumber } = params;
   const router = useRouter();
   const week = Number(weekNumber);
-
 
   // --- STATE ---
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -318,15 +316,13 @@ export default function CourseWeekPage({ params }) {
   const [kgError, setKgError] = useState(null);
   const [isLoadingKG, setIsLoadingKG] = useState(true);
 
-
   const [activeConceptId, setActiveConceptId] = useState(null);
   const [processingFiles, setProcessingFiles] = useState([]);
-
 
   const [quizzes, setQuizzes] = useState([]);
   const [selectedQuizId, setSelectedQuizId] = useState(null);
   const [expandedQuizSettingsId, setExpandedQuizSettingsId] = useState(null); 
-
+  const [deletingQuizId, setDeletingQuizId] = useState(null); // <--- NEW STATE FOR DELETE
 
   const [quizStats, setQuizStats] = useState(null);
   const [quizPreview, setQuizPreview] = useState(null);
@@ -334,22 +330,16 @@ export default function CourseWeekPage({ params }) {
   const [previewError, setPreviewError] = useState(null);
   const [filterDifficulty, setFilterDifficulty] = useState("All");
 
-
   // --- FETCHERS ---
   const fetchKnowledgeGraph = useCallback(async () => {
     if (!courseId || !Number.isFinite(week)) return;
-    
-    // -------------------------------------------------------------
-    // NUCLEAR FIX: Check file count first. If 0, WIPE GRAPH.
-    // -------------------------------------------------------------
     try {
        const fileRes = await fetch(`${BACKEND_URL}/api/lecture-history/?course_id=${courseId}&t=${Date.now()}`);
        const files = await fileRes.json();
        const weekFiles = Array.isArray(files) ? files.filter(f => String(f.week) === String(week)) : [];
 
-
        if (weekFiles.length === 0) {
-           console.log("NUCLEAR FIX: No files found for week. Forcing graph wipe.");
+           console.log("No files found for week. Forcing graph wipe.");
            setKnowledgeGraph({ nodes: [], edges: [] });
            setActiveConceptId(null);
            setIsLoadingKG(false);
@@ -358,8 +348,6 @@ export default function CourseWeekPage({ params }) {
     } catch(e) {
         console.error("File check failed, continuing to KG fetch", e);
     }
-    // -------------------------------------------------------------
-
 
     setIsLoadingKG(true);
     setKgError(null);
@@ -376,7 +364,6 @@ export default function CourseWeekPage({ params }) {
     }
   }, [courseId, week]);
 
-
   const fetchQuizzes = useCallback(async () => {
     if (!courseId || !Number.isFinite(week)) return;
     try {
@@ -388,9 +375,8 @@ export default function CourseWeekPage({ params }) {
     }
   }, [courseId, week]);
 
-
   const loadPreview = useCallback(async () => {
-    if (!selectedQuizId) return null; // Return null if no ID
+    if (!selectedQuizId) return null; 
     setLoadingPreview(true);
     setPreviewError(null);
     try {
@@ -398,7 +384,7 @@ export default function CourseWeekPage({ params }) {
       const data = await safeJson(res);
       const mcqs = Array.isArray(data?.mcqs) ? data.mcqs : [];
       setQuizPreview({ mcqs });
-      return { mcqs }; // RETURN the data for the useEffect
+      return { mcqs }; 
     } catch (e) {
       setPreviewError(e.message);
       setQuizPreview({ mcqs: [] });
@@ -408,8 +394,6 @@ export default function CourseWeekPage({ params }) {
     }
   }, [selectedQuizId]);
 
-
-
   const fetchQuizStats = useCallback(async () => {
     if (!selectedQuizId) return;
     try {
@@ -418,16 +402,13 @@ export default function CourseWeekPage({ params }) {
     } catch(e) {}
   }, [selectedQuizId]);
 
-
   const handleProcessingStarted = useCallback((processingId, fileName) => {
     setProcessingFiles((prev) => [...prev, { processingId, fileName }]);
   }, []);
 
-
   const handleConceptSelect = useCallback((conceptId) => {
     setActiveConceptId(conceptId);
   }, []);
-
 
   // --- ACTIONS ---
   const generateQuizMCQs = async () => {
@@ -448,6 +429,37 @@ export default function CourseWeekPage({ params }) {
     }
   };
 
+  // --- DELETE QUIZ HANDLER ---
+  async function handleDeleteQuiz(e, quizId) {
+    e.stopPropagation(); // Stop click from selecting the quiz
+    
+    if (!confirm("Are you sure you want to delete this quiz? This action cannot be undone.")) return;
+
+    setDeletingQuizId(quizId);
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/quiz/${quizId}`, {
+        method: "DELETE",
+      });
+
+      if (res.ok) {
+        // Refresh the list
+        fetchQuizzes();
+        // If we deleted the active quiz, clear the selection
+        if (selectedQuizId === quizId) {
+          setSelectedQuizId(null);
+          setExpandedQuizSettingsId(null);
+          setQuizPreview(null);
+        }
+      } else {
+        alert("Failed to delete quiz");
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Error deleting quiz");
+    } finally {
+      setDeletingQuizId(null);
+    }
+  }
 
   // --- EFFECTS ---
   useEffect(() => {
@@ -455,31 +467,16 @@ export default function CourseWeekPage({ params }) {
     fetchQuizzes();
   }, [fetchKnowledgeGraph, fetchQuizzes]);
 
-
-  // Auto-select first concept
   useEffect(() => {
     if (knowledgeGraph.nodes.length > 0 && !activeConceptId) {
       setActiveConceptId(knowledgeGraph.nodes.find(n => n.isRoot)?.id || knowledgeGraph.nodes[0].id);
     }
   }, [knowledgeGraph.nodes, activeConceptId]);
 
-
-  // Refresh preview when quiz changes
-  useEffect(() => {
-    if (selectedQuizId) {
-      loadPreview();
-      fetchQuizStats();
-      setExpandedQuizSettingsId(selectedQuizId);
-    }
-  }, [selectedQuizId, loadPreview, fetchQuizStats]);
-
   // Refresh preview AND AUTO-GENERATE when quiz changes
   useEffect(() => {
     if (selectedQuizId) {
-      // 1. Load existing questions first
       loadPreview().then((data) => {
-        // 2. If NO questions exist, automatically generate them
-        // We check the data returned from loadPreview or the state if available
         if (!data || !data.mcqs || data.mcqs.length === 0) {
             console.log("Auto-generating MCQs for new quiz...");
             generateQuizMCQs(); 
@@ -489,8 +486,7 @@ export default function CourseWeekPage({ params }) {
       fetchQuizStats();
       setExpandedQuizSettingsId(selectedQuizId);
     }
-  }, [selectedQuizId]); // Removed loadPreview/generateQuizMCQs from dependency array to avoid loops
-
+  }, [selectedQuizId]); 
 
   // Polling Effect
   useEffect(() => {
@@ -504,13 +500,9 @@ export default function CourseWeekPage({ params }) {
               `${BACKEND_URL}/api/lecture-status?processing_id=${f.processingId}`
             );
             const data = await safeJson(res);
-              
-            // If the backend has made progress (e.g. Phase 1 done > 10%), 
-            // fetch the graph to show partial results (the Root Node).
             if (data.status === "processing" && data.progress >= 20) {
                 fetchKnowledgeGraph(); 
             }
-              
             return { ...data, processingId: f.processingId };
           } catch {
             return { status: "error", processingId: f.processingId };
@@ -520,7 +512,6 @@ export default function CourseWeekPage({ params }) {
   
       const doneJobs = results.filter((r) => r.status === "done");
   
-      // Handle Done Jobs
       if (doneJobs.length > 0) {
         setProcessingFiles((prev) =>
           prev.filter((p) => !doneJobs.some((d) => d.processingId === p.processingId))
@@ -532,12 +523,11 @@ export default function CourseWeekPage({ params }) {
           setRefreshTrigger((prev) => prev + 1);
         }, 1000);
       }
-    }, 2000); // Poll every 2 seconds for snappier updates
+    }, 2000); 
   
     return () => clearInterval(interval);
   }, [processingFiles, fetchKnowledgeGraph, fetchQuizzes]);
   
-
 
   // --- RENDER HELPERS ---
   const activeConcept = knowledgeGraph.nodes?.find(n => n.id === activeConceptId) || null;
@@ -549,13 +539,11 @@ export default function CourseWeekPage({ params }) {
   const hardCount = allMcqs.filter(m => m.difficulty === "Hard").length;
   const totalCount = allMcqs.length;
 
-
   const visibleQuestions = allMcqs.filter(m => filterDifficulty === "All" || (m.difficulty || "Medium") === filterDifficulty);
   
   const questionCountLabel = !loadingPreview && totalCount > 0 
     ? `(${totalCount} total • ${easyCount} Easy, ${mediumCount} Medium, ${hardCount} Hard)`
     : "";
-
 
   return (
     <div className="flex h-screen bg-gray-50 overflow-hidden font-sans text-gray-900">
@@ -585,7 +573,6 @@ export default function CourseWeekPage({ params }) {
         </div>
       </div>
 
-
       {/* MAIN SCROLLABLE AREA */}
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-[1600px] mx-auto p-6 space-y-8 pb-20">
@@ -601,7 +588,6 @@ export default function CourseWeekPage({ params }) {
                <p className="text-sm text-gray-400 mt-1 font-mono">ID: {courseId}</p>
             </div>
           </div>
-
 
             {/* TWO-COLUMN LAYOUT: UPLOAD & FILES LIST */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch">
@@ -627,7 +613,6 @@ export default function CourseWeekPage({ params }) {
               </div>
             </div>
 
-
             {/* RIGHT: File List */}
             <div className="h-full">
               <div className="bg-white rounded-2xl shadow-md border border-gray-200 h-full min-h-[200px] flex flex-col">
@@ -646,7 +631,6 @@ export default function CourseWeekPage({ params }) {
             </div>
           </div>
 
-
           {/* Processing Status */}
           {processingFiles.length > 0 && (
             <div className="bg-blue-50 border border-blue-200 rounded-xl p-5 mb-6">
@@ -664,7 +648,7 @@ export default function CourseWeekPage({ params }) {
           {/* CONCEPT GRAPH */}
           <div className="bg-white rounded-2xl shadow-lg border border-gray-200 overflow-hidden relative">
               
-              {/* Header - Outside the relative container for clean separation */}
+              {/* Header */}
               <div className="p-4 bg-gradient-to-r from-blue-50 to-indigo-50 border-b flex justify-between items-center">
                   <h3 className="font-semibold text-gray-800">🧠 Concept Map</h3>
                   <div className="flex items-center gap-2">
@@ -673,18 +657,15 @@ export default function CourseWeekPage({ params }) {
                   </div>
               </div>
 
-
               {/* Graph Container */}
               <div className="h-[500px] relative bg-white"> 
-                  
-                  {/* Loading Overlay - Shows only during the "Root -> Full Graph" transition */}
+                  {/* Loading Overlay */}
                   {processingFiles.length > 0 && knowledgeGraph.nodes.length > 0 && knowledgeGraph.nodes.length < 5 && (
                       <div className="absolute top-4 right-4 z-20 bg-white/90 backdrop-blur border border-blue-200 text-blue-700 px-3 py-1.5 rounded-full text-xs font-semibold shadow-sm flex items-center gap-2 animate-pulse transition-all">
                           <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce"></div>
                           Expanding Universe...
                       </div>
                   )}
-
 
                   {/* The Graph Itself */}
                   {knowledgeGraph.nodes.length > 0 ? (
@@ -704,7 +685,6 @@ export default function CourseWeekPage({ params }) {
               </div>
           </div>
 
-
           {/* REST OF PAGE */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 h-[700px]">
              {/* LEFT: Concept Details */}
@@ -714,7 +694,6 @@ export default function CourseWeekPage({ params }) {
                    <SlideViewer concept={activeConcept} courseId={courseId} week={weekNumber} />
                 </div>
              </div>
-
 
              {/* RIGHT: Quiz Creator */}
              <div className="bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col overflow-hidden">
@@ -732,7 +711,6 @@ export default function CourseWeekPage({ params }) {
              </div>
           </div>
 
-
           {/* QUIZ MANAGER SECTION */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start pt-4 border-t border-gray-200 min-h-[600px]">
              
@@ -746,11 +724,10 @@ export default function CourseWeekPage({ params }) {
                <div className="p-4 space-y-4 flex-1">
                  {quizzes.length === 0 && <p className="text-gray-400 italic text-sm text-center py-10">No quizzes created yet.</p>}
 
-
                  {quizzes.map((q, idx) => {
                    const isSelected = selectedQuizId === q.id;
                    return (
-                     <div key={q.id} className={`rounded-xl border-2 transition-all overflow-hidden bg-white ${isSelected ? "border-blue-500 shadow-md ring-2 ring-blue-50" : "border-gray-200 hover:border-blue-300"}`}>
+                     <div key={q.id} className={`rounded-xl border-2 transition-all overflow-hidden bg-white ${isSelected ? "border-blue-500 shadow-md ring-2 ring-blue-50" : "border-gray-200 hover:border-blue-300"} group relative`}>
                         <div 
                           onClick={() => {
                              setSelectedQuizId(q.id);
@@ -758,14 +735,33 @@ export default function CourseWeekPage({ params }) {
                           }}
                           className="p-4 cursor-pointer"
                         >
-                           <div className="flex justify-between items-start mb-1">
-                              <h3 className="font-bold text-lg text-gray-900">{q.name}</h3>
+                           <div className="flex justify-between items-start mb-1 pr-6">
+                              <h3 className="font-bold text-lg text-gray-900 truncate">{q.name}</h3>
                               <span className="text-xs font-mono text-gray-400">#{idx + 1}</span>
                            </div>
                            <p className="text-xs text-gray-500 mt-1 line-clamp-2">
                              Concepts: {(q.concept_ids || q.conceptids || []).length}
                            </p>
                         </div>
+                        
+                        {/* DELETE BUTTON */}
+                        <button
+                          onClick={(e) => handleDeleteQuiz(e, q.id)}
+                          disabled={deletingQuizId === q.id}
+                          className={`
+                            absolute right-2 top-2 p-1.5 rounded text-gray-400 hover:text-red-600 hover:bg-red-50 
+                            opacity-0 group-hover:opacity-100 transition-all z-20
+                            ${deletingQuizId === q.id ? "opacity-100 cursor-wait" : ""}
+                          `}
+                          title="Delete Quiz"
+                        >
+                           {deletingQuizId === q.id ? (
+                             <span className="text-xs">⏳</span>
+                           ) : (
+                             <span>🗑️</span>
+                           )}
+                        </button>
+
                         {isSelected && expandedQuizSettingsId === q.id && (
                            <div className="border-t border-gray-100 bg-gray-50 p-4 animate-in slide-in-from-top-2 duration-200">
                               <h4 className="text-xs font-bold text-gray-400 uppercase mb-2">Settings</h4>
@@ -777,7 +773,6 @@ export default function CourseWeekPage({ params }) {
                  })}
                </div>
              </div>
-
 
              {/* RIGHT COLUMN: Question Bank Review */}
              <div className="lg:col-span-8 h-[600px]">
@@ -803,7 +798,6 @@ export default function CourseWeekPage({ params }) {
                               else if (lvl === "Easy") count = easyCount;
                               else if (lvl === "Medium") count = mediumCount;
                               else if (lvl === "Hard") count = hardCount;
-
 
                               return (
                                 <button
@@ -834,7 +828,6 @@ export default function CourseWeekPage({ params }) {
                           </button>
                        </div>
                     </div>
-
 
                     <div className="p-6 bg-gray-50/50 flex-1 overflow-y-auto custom-scrollbar">
                        {previewError && <div className="bg-red-50 text-red-600 p-4 rounded mb-4 text-sm border border-red-200">{previewError}</div>}

@@ -847,123 +847,121 @@ async def generate_mcqs(payload: MCQConceptModel = Body(...)):
         }]}
 
 
-@app.post("/api/generate-mcqs-kg/")
+@app.post("/api/generate-mcqs-kg")
 async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_db)):
     course_id = payload.get("course_id")
     week = payload.get("week")
     concept_id = payload.get("concept_id") or payload.get("segment_id")
     quiz_id = payload.get("quiz_id")
 
-    # 1. DETERMINE VALID DIFFICULTY RANGE
-    # Default to full range
-    valid_difficulties = ["Easy", "Medium", "Hard"] 
-    
+    # 1. Determine Difficulty Range
+    allowed_str = "'Easy', 'Medium', 'Hard'"
     if quiz_id:
-        settings = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
-        if settings:
-            all_levels = ["Easy", "Medium", "Hard"]
-            min_d = settings.min_difficulty or "Easy"
-            max_d = settings.max_difficulty or "Hard"
-            
+        try:
+            settings = None
             try:
-                start_idx = all_levels.index(min_d)
-                end_idx = all_levels.index(max_d)
-                # Handle case where user might swap min/max
-                if start_idx > end_idx: 
-                    start_idx, end_idx = end_idx, start_idx
+                settings = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
+            except AttributeError:
+                settings = db.query(QuizSettings).filter(QuizSettings.quizid == quiz_id).first()
                 
-                valid_difficulties = all_levels[start_idx : end_idx + 1]
-            except ValueError:
-                # Fallback if DB has invalid string values
-                valid_difficulties = ["Medium"]
+            if settings:
+                all_levels = ["Easy", "Medium", "Hard"]
+                mind = settings.mindifficulty or "Easy"
+                maxd = settings.maxdifficulty or "Hard"
+                try:
+                    start_idx = all_levels.index(mind)
+                    end_idx = all_levels.index(maxd)
+                    if start_idx > end_idx: start_idx, end_idx = end_idx, start_idx
+                    allowed_str = ", ".join([f"'{x}'" for x in all_levels[start_idx : end_idx+1]])
+                except ValueError:
+                    pass 
+        except Exception:
+            pass
 
-    # Debug print to confirm range
-    print(f"[DEBUG] Generating MCQs for {concept_id} with allowed difficulties: {valid_difficulties}")
+    # 2. Fetch KG Context (Robust Attribute Access)
+    kg_entry = None
+    try:
+        # Try course_id (standard)
+        kg_entry = db.query(KnowledgeGraph).filter(
+            KnowledgeGraph.course_id == course_id,
+            KnowledgeGraph.week == week
+        ).first()
+    except AttributeError:
+        # Try courseid (legacy/alternate)
+        try:
+            kg_entry = db.query(KnowledgeGraph).filter(
+                KnowledgeGraph.courseid == course_id,
+                KnowledgeGraph.week == week
+            ).first()
+        except Exception as e:
+            print(f"KG Attribute Lookup Error: {e}")
 
-    # 2. FETCH KG DATA
-    kg_row = db.execute(
-        sql_text("SELECT node_data, edge_data FROM knowledge_graph WHERE course_id=:c AND week=:w"),
-        {"c": course_id, "w": week}
-    ).fetchone()
-    
-    kg_nodes = []
-    kg_edges = []
-    if kg_row:
-        kg_nodes = json.loads(kg_row[0]) if kg_row[0] else []
-        kg_edges = json.loads(kg_row[1]) if kg_row[1] else []
+    selected_summary = ""
+    selected_contents = ""
 
-    # Find the selected node data for context
-    selected_node = next((n for n in kg_nodes if n["id"] == concept_id), None)
-    selected_summary = selected_node.get("summary", "") if selected_node else ""
-    selected_contents = selected_node.get("contents", "") if selected_node else ""
+    if kg_entry:
+        try:
+            # SAFELY access nodedata or node_data
+            raw_node_data = getattr(kg_entry, 'nodedata', getattr(kg_entry, 'node_data', None))
+            
+            if raw_node_data:
+                kg_nodes = json.loads(raw_node_data)
+                selected_node = next((n for n in kg_nodes if n.get('id') == concept_id), None)
+                if selected_node:
+                    selected_summary = selected_node.get('summary', '')
+                    selected_contents = selected_node.get('contents', selected_summary)
+            else:
+                print("Warning: KG entry found but no node data attribute matched.")
+                
+        except json.JSONDecodeError:
+            print("Error decoding KG JSON")
+        except Exception as e:
+            print(f"Error parsing KG nodes: {e}")
 
-    # 3. PROMPT LLM
-    # Explicitly list the allowed difficulties in the prompt
-    allowed_str = ", ".join(valid_difficulties)
-    
+    # 3. Prompt Generation (Strict Anti-Hallucination)
     prompt = (
-        f"As a teaching assistant, generate several relevant multiple-choice questions (MCQs) for the concept '{concept_id}'. "
-        f"TARGET DIFFICULTIES: {allowed_str}. "
-        "Use the summary and content below for context. "
-        "For each MCQ, you MUST include a 'difficulty' field set to one of the target values. "
-        "Respond ONLY as a JSON list in this format: "
-        '[{"question": "...", "options": ["A", "B", "C", "D"], "answer": "...", "difficulty": "..."}]'
-        f"\n\nConcept Summary:\n{selected_summary[:600]}"
-        f"\n\nConcept Details:\n{selected_contents[:1000]}"
+        f"As an expert computer science instructor, create relevant multiple-choice questions (MCQs) for the concept '{concept_id}'.\n"
+        f"TARGET DIFFICULTIES: {allowed_str}.\n"
+        "Use the provided Summary and Details below for technical accuracy, but DO NOT REFER TO THEM in the questions.\n\n"
+        "STRICT RULES:\n"
+        "1. The questions must stand alone as standard exam questions.\n"
+        "2. NEVER use phrases like 'according to the text', 'as mentioned above', 'in the provided context'.\n"
+        "3. Provide exactly 4 options per question.\n"
+        "4. Include a 'difficulty' field for each question matching the target difficulties.\n"
+        "5. Respond ONLY as a JSON list.\n\n"
+        "Response Format:\n"
+        "[{'question': '...', 'options': ['A', 'B', 'C', 'D'], 'answer': '...', 'difficulty': '...'}]\n\n"
+        f"Summary:\n{selected_summary[:800]}\n"
+        f"Details:\n{selected_contents[:1200]}"
     )
 
     try:
-        model = genai.GenerativeModel("models/gemini-2.5-flash")
+        model = genai.GenerativeModel('models/gemini-2.5-flash')
         response = model.generate_content(prompt)
-        
-        # Safely extract text
-        if hasattr(response, "text"):
-            model_output = response.text
-        elif hasattr(response, "candidates") and response.candidates:
-            model_output = response.candidates[0].content.parts[0].text
-        else:
-            model_output = str(response)
-
-        # Parse response
+        model_output = getattr(response, 'text', str(response))
         mcqs = extract_mcqs_from_response(model_output)
+
         out = []
+        valid_difficulties = [d.strip("' ") for d in allowed_str.split(",")]
         
         for item in mcqs:
-            # Basic validation
-            if isinstance(item, dict) and "question" in item and "options" in item and "answer" in item:
-                # Ensure options is a list
-                if not isinstance(item["options"], list):
+            if isinstance(item, dict) and 'question' in item and 'options' in item and 'answer' in item:
+                if 'difficulty' not in item or item['difficulty'] not in valid_difficulties:
+                    item['difficulty'] = random.choice(valid_difficulties)
+                
+                # Check for hallucinations
+                q_text = item['question'].lower()
+                if "provided text" in q_text or "according to" in q_text:
                     continue
 
-                # --- CRITICAL FIX: FORCE VALID DIFFICULTY ---
-                # If difficulty is missing OR invalid, overwrite it with a random valid one
-                if "difficulty" not in item or item["difficulty"] not in valid_difficulties:
-                    item["difficulty"] = random.choice(valid_difficulties)
-                
+                item['concept_id'] = concept_id
                 out.append(item)
         
-        # If LLM returned valid JSON but no valid items, return fallback
-        if not out:
-             fallback_diff = random.choice(valid_difficulties)
-             return {"mcqs": [{
-                 "question": f"No valid MCQs generated for '{concept_id}'.", 
-                 "options": ["Option A", "Option B", "Option C", "Option D"], 
-                 "answer": "Option A", 
-                 "difficulty": fallback_diff
-             }]}
-             
         return {"mcqs": out}
 
     except Exception as ex:
-        print("[MCQ KG GENERATION ERROR]", ex)
-        # Fallback on crash
-        fallback_diff = random.choice(valid_difficulties) if valid_difficulties else "Medium"
-        return {"mcqs": [{
-            "question": "Sample fallback MCQ: LLM Error, please try again.", 
-            "options": ["Option A", "Option B", "Option C", "Option D"], 
-            "answer": "Option A",
-            "difficulty": fallback_diff
-        }]}
+        print(f"MCQ GENERATION ERROR: {ex}")
+        return {"mcqs": []}
 
 
 @app.get("/api/mcqs/")
@@ -1116,6 +1114,40 @@ def delete_upload(upload_id: str, db: Session = Depends(get_db)):
     db.delete(record)
     db.commit()
     return {"status": "deleted"}
+
+@app.delete("/api/quiz/{quiz_id}")
+async def delete_quiz(quiz_id: str, db: Session = Depends(get_db)):
+    """
+    Deletes a quiz and all its related data (MCQs, attempts, settings).
+    """
+    # 1. Find the quiz
+    quiz = db.query(Quiz).filter(Quiz.id == quiz_id).first()
+    if not quiz:
+        raise HTTPException(status_code=404, detail="Quiz not found")
+
+    # 2. Delete related MCQs
+    db.query(MCQ).filter(MCQ.quiz_id == quiz_id).delete()
+    
+    # 3. Delete related Attempts (optional, but good for cleanup)
+    db.query(QuizAttempt).filter(QuizAttempt.quiz_id == quiz_id).delete()
+    
+    # 4. Delete Settings
+    # Try both attribute names for safety based on our previous fixes
+    try:
+        db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).delete()
+    except:
+        db.query(QuizSettings).filter(QuizSettings.quizid == quiz_id).delete()
+
+    # 5. Delete the Quiz itself
+    db.delete(quiz)
+    
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to delete quiz: {e}")
+
+    return {"status": "deleted", "quiz_id": quiz_id}
 
 # Add WebSocket endpoint
 @app.websocket("/ws/{course_id}/{week}")
