@@ -1450,25 +1450,48 @@ async def delete_upload(uploadid: str = Form(...), db: Session = Depends(get_db)
 
 @app.get("/api/quiz/settings/{quiz_id}", response_model=QuizSettingsOut)
 async def get_quiz_settings(quiz_id: str, db: Session = Depends(get_db)):
-    qs = db.query(QuizSettings).filter(QuizSettings.quizid == quiz_id).first()
+    # 1. Fetch from DB (try both attribute names to be safe)
+    try:
+        qs = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
+    except AttributeError:
+        qs = db.query(QuizSettings).filter(QuizSettings.quizid == quiz_id).first()
     
+    # 2. If no settings exist, create defaults
     if not qs:
         quiz = db.query(Quiz).filter(Quiz.id == quiz_id).first()
         default_week = quiz.week if quiz else 1
         
-        return QuizSettingsOut(
-            id=-1,              # Dummy ID to indicate unsaved
-            quizid=quiz_id,
-            week=default_week,
-            mindifficulty="Easy",
-            maxdifficulty="Hard",
-            maxquestions=10,    # Default to 10 questions
-            allowedretries=3,   # Default to 3 retries
-            feedbackstyle="Immediate",
-            includespaced=False
-        )
+        # RETURN DICT: Pydantic will validate this against its schema
+        # We provide BOTH keys so whichever one Pydantic wants, it finds.
+        return {
+            "id": -1,
+            "quizid": quiz_id,   # Case A
+            "quiz_id": quiz_id,  # Case B (Pydantic likely wants this)
+            "week": default_week,
+            "mindifficulty": "Easy",
+            "maxdifficulty": "Hard",
+            "maxquestions": 10,
+            "allowedretries": 3,
+            "feedbackstyle": "Immediate",
+            "includespaced": False
+        }
 
-    return qs
+    # 3. If settings exist, return them
+    # Safely get the ID from the SQLAlchemy object
+    q_id_val = getattr(qs, 'quiz_id', getattr(qs, 'quizid', quiz_id))
+    
+    return {
+        "id": qs.id,
+        "quizid": q_id_val,
+        "quiz_id": q_id_val,
+        "week": qs.week,
+        "mindifficulty": qs.mindifficulty,
+        "maxdifficulty": qs.maxdifficulty,
+        "maxquestions": qs.maxquestions,
+        "allowedretries": qs.allowedretries,
+        "feedbackstyle": qs.feedbackstyle,
+        "includespaced": qs.includespaced
+    }
 
 
 @app.get("/api/quiz/questions/{quiz_id}")
@@ -1500,19 +1523,16 @@ def get_quiz_questions(quiz_id: str, db: Session = Depends(get_db)):
 
 @app.post("/api/quiz/settings/{quiz_id}", response_model=QuizSettingsOut)
 async def upsert_quiz_settings(quiz_id: str, payload: QuizSettingsIn, db: Session = Depends(get_db)):
-    """
-    Create or Update settings for a specific quiz.
-    Ensures default values are applied if fields are missing.
-    """
-    # 1. Try to find existing settings
-    qs = db.query(QuizSettings).filter(QuizSettings.quizid == quiz_id).first()
+    # 1. Find existing
+    try:
+        qs = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
+    except AttributeError:
+        qs = db.query(QuizSettings).filter(QuizSettings.quizid == quiz_id).first()
     
-    # 2. If not found, create a new record
+    # 2. Create if new
     if qs is None:
         qs = QuizSettings(
-            quizid=quiz_id,
             week=payload.week,
-            # Apply defaults immediately on creation
             mindifficulty=payload.mindifficulty or "Easy",
             maxdifficulty=payload.maxdifficulty or "Hard",
             maxquestions=payload.maxquestions if payload.maxquestions is not None else 10,
@@ -1520,48 +1540,40 @@ async def upsert_quiz_settings(quiz_id: str, payload: QuizSettingsIn, db: Sessio
             feedbackstyle=payload.feedbackstyle or "Immediate",
             includespaced=payload.includespaced
         )
+        # Assign FK safely
+        if hasattr(QuizSettings, 'quiz_id'):
+            qs.quiz_id = quiz_id
+        else:
+            qs.quizid = quiz_id
         db.add(qs)
     else:
-        # 3. If found, update existing record
+        # 3. Update existing
         qs.week = payload.week
-        
-        # Update logic: If payload has a value, use it. 
-        # If payload is None, keep existing. 
-        # If both are None (shouldn't happen), fallback to default.
-        if payload.mindifficulty:
-            qs.mindifficulty = payload.mindifficulty
-            
-        if payload.maxdifficulty:
-            qs.maxdifficulty = payload.maxdifficulty
-            
-        if payload.maxquestions is not None:
-            qs.maxquestions = payload.maxquestions
-            
-        if payload.allowedretries is not None:
-            qs.allowedretries = payload.allowedretries
-            
-        if payload.feedbackstyle:
-            qs.feedbackstyle = payload.feedbackstyle
-            
-        # Boolean field is simpler - just take the payload value
+        qs.mindifficulty = payload.mindifficulty or qs.mindifficulty or "Easy"
+        qs.maxdifficulty = payload.maxdifficulty or qs.maxdifficulty or "Hard"
+        qs.maxquestions = payload.maxquestions if payload.maxquestions is not None else qs.maxquestions
+        qs.allowedretries = payload.allowedretries if payload.allowedretries is not None else qs.allowedretries
+        qs.feedbackstyle = payload.feedbackstyle or qs.feedbackstyle or "Immediate"
         qs.includespaced = payload.includespaced
 
-    # 4. Commit and Refresh
     db.commit()
     db.refresh(qs)
     
-    # 5. Return Pydantic model
-    return QuizSettingsOut(
-        id=qs.id,
-        quizid=qs.quizid,
-        week=qs.week,
-        mindifficulty=qs.mindifficulty,
-        maxdifficulty=qs.maxdifficulty,
-        maxquestions=qs.maxquestions,
-        allowedretries=qs.allowedretries,
-        feedbackstyle=qs.feedbackstyle,
-        includespaced=qs.includespaced
-    )
+    # 4. Return Dict with both key variations
+    q_id_val = getattr(qs, 'quiz_id', getattr(qs, 'quizid', quiz_id))
+    
+    return {
+        "id": qs.id,
+        "quizid": q_id_val,
+        "quiz_id": q_id_val,
+        "week": qs.week,
+        "mindifficulty": qs.mindifficulty,
+        "maxdifficulty": qs.maxdifficulty,
+        "maxquestions": qs.maxquestions,
+        "allowedretries": qs.allowedretries,
+        "feedbackstyle": qs.feedbackstyle,
+        "includespaced": qs.includespaced
+    }
 
 @app.post("/api/quiz/generate-title")
 async def generate_quiz_title(payload: TitleGenRequest):

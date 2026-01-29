@@ -390,20 +390,24 @@ export default function CourseWeekPage({ params }) {
 
 
   const loadPreview = useCallback(async () => {
-    if (!selectedQuizId) return;
+    if (!selectedQuizId) return null; // Return null if no ID
     setLoadingPreview(true);
     setPreviewError(null);
     try {
       const res = await fetch(`${BACKEND_URL}/api/quiz/questions/${selectedQuizId}`, { cache: "no-store" });
       const data = await safeJson(res);
-      setQuizPreview({ mcqs: Array.isArray(data?.mcqs) ? data.mcqs : [] });
+      const mcqs = Array.isArray(data?.mcqs) ? data.mcqs : [];
+      setQuizPreview({ mcqs });
+      return { mcqs }; // RETURN the data for the useEffect
     } catch (e) {
       setPreviewError(e.message);
       setQuizPreview({ mcqs: [] });
+      return { mcqs: [] };
     } finally {
       setLoadingPreview(false);
     }
   }, [selectedQuizId]);
+
 
 
   const fetchQuizStats = useCallback(async () => {
@@ -469,6 +473,23 @@ export default function CourseWeekPage({ params }) {
     }
   }, [selectedQuizId, loadPreview, fetchQuizStats]);
 
+  // Refresh preview AND AUTO-GENERATE when quiz changes
+  useEffect(() => {
+    if (selectedQuizId) {
+      // 1. Load existing questions first
+      loadPreview().then((data) => {
+        // 2. If NO questions exist, automatically generate them
+        // We check the data returned from loadPreview or the state if available
+        if (!data || !data.mcqs || data.mcqs.length === 0) {
+            console.log("Auto-generating MCQs for new quiz...");
+            generateQuizMCQs(); 
+        }
+      });
+      
+      fetchQuizStats();
+      setExpandedQuizSettingsId(selectedQuizId);
+    }
+  }, [selectedQuizId]); // Removed loadPreview/generateQuizMCQs from dependency array to avoid loops
 
 
   // Polling Effect
