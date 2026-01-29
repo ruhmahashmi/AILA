@@ -1,6 +1,6 @@
 # AILA – An Intelligent Lecturing Assistant
 
-This repository contains the full code and research artifacts for the AILA STAR project.  
+This repository contains the full code and research artifacts for the AILA project.  
 AILA (AI‑powered Intelligent Lecturing Assistant) is a research system that supports secure logins, lecture material upload, knowledge extraction, automated segmentation, retrieval‑augmented AI teaching assistant, and role‑based dashboards for instructors and students.
 
 ## Project Structure
@@ -31,7 +31,7 @@ See `aila_backend/README.md` for detailed backend setup.
 2. `pip install -r requirements.txt`
 3. `uvicorn main:app --reload`
 
-The backend will create `ailastar.db` automatically and listens on `http://localhost:8000` by default.
+The backend will create `ailastar.db` automatically and listens on `process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'` by default.
 
 ### Frontend
 
@@ -42,7 +42,7 @@ See `aila_frontend/README.md` for detailed frontend setup.
 3. `npm run dev`
 
 
-The frontend runs on `http://localhost:3000` by default and expects the backend at `http://localhost:8000` (configurable via environment).
+The frontend runs on `http://localhost:3000` by default and expects the backend at `process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'` (configurable via environment).
 
 ## Development Notes
 

@@ -1,129 +1,202 @@
 // components/QuizSettingsForm.js
-"use client";
-import { useEffect, useState } from "react";
+'use client';
 
-export default function QuizSettingsForm({ quizId, week, onSaved }) {  // ADDED onSaved prop
-  const [form, setForm] = useState({
-    week,
-    min_difficulty: "",
-    max_difficulty: "",
-    max_questions: "",
-    allowed_retries: "",
-    feedback_style: "",
-    include_spaced: false,
+import { useState, useEffect } from "react";
+
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+
+export default function QuizSettingsForm({ quizId, week }) {
+  // 1. Initialize State with sensible DEFAULTS (matches backend)
+  // This prevents the "none" or empty state while loading.
+  const [settings, setSettings] = useState({
+    mindifficulty: "Easy",
+    maxdifficulty: "Hard",
+    maxquestions: 10,
+    allowedretries: 3,
+    feedbackstyle: "Immediate",
+    includespaced: false
   });
-  const [loading, setLoading] = useState(false);
-  const [saved, setSaved] = useState(false);
+  
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState(null);
 
+  // 2. Fetch settings when the component mounts or quizId changes
   useEffect(() => {
-    if (!quizId) return;
-    async function loadSettings() {
+    let active = true;
+
+    async function fetchSettings() {
+      if (!quizId) return;
+      setLoading(true);
       try {
-        const res = await fetch(`http://localhost:8000/api/quiz/settings/${quizId}`);
-        if (!res.ok) return;
-        const data = await res.json();
-        if (!data) return;
-        setForm({
-          week: data.week,
-          min_difficulty: data.min_difficulty || "",
-          max_difficulty: data.max_difficulty || "",
-          max_questions: data.max_questions ?? "",
-          allowed_retries: data.allowed_retries ?? "",
-          feedback_style: data.feedback_style || "",
-          include_spaced: data.include_spaced ?? false,
-        });
+        const res = await fetch(`${BACKEND_URL}/api/quiz/settings/${quizId}`);
+        if (res.ok) {
+          const data = await res.json();
+          // Only update state if the component is still mounted
+          if (active && data) {
+            setSettings({
+              mindifficulty: data.mindifficulty || "Easy",
+              maxdifficulty: data.maxdifficulty || "Hard",
+              maxquestions: data.maxquestions ?? 10,
+              allowedretries: data.allowedretries ?? 3,
+              feedbackstyle: data.feedbackstyle || "Immediate",
+              includespaced: data.includespaced ?? false
+            });
+          }
+        }
       } catch (e) {
-        console.error("Failed to load quiz settings", e);
+        console.error("Failed to fetch settings", e);
+      } finally {
+        if (active) setLoading(false);
       }
     }
-    loadSettings();
+
+    fetchSettings();
+    return () => { active = false; };
   }, [quizId]);
 
-  const updateField = (field) => (e) => {
-    const value = field === "include_spaced" ? e.target.checked : e.target.value;
-    setForm((prev) => ({ ...prev, [field]: value }));
-    setSaved(false);
-  };
+  // 3. Handle Save
+  async function handleSave() {
+    setSaving(true);
+    setMessage(null);
 
-  // FIXED: Call onSaved after successful save
-  const handleSave = async (e) => {
-    e.preventDefault();
-    if (!quizId) return;
-    setLoading(true);
-    setSaved(false);
     try {
-      const res = await fetch(`http://localhost:8000/api/quiz/settings/${quizId}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          week: form.week,
-          min_difficulty: form.min_difficulty || null,
-          max_difficulty: form.max_difficulty || null,
-          max_questions: form.max_questions === "" ? null : Number(form.max_questions),
-          allowed_retries: form.allowed_retries === "" ? null : Number(form.allowed_retries),
-          feedback_style: form.feedback_style || null,
-          include_spaced: !!form.include_spaced,
-        }),
-      });
-      if (!res.ok) throw new Error("Save failed");
-      await res.json();
-      setSaved(true);
-      onSaved?.();  // REFRESH PREVIEW AFTER SAVE
-    } catch (err) {
-      console.error(err);
-      alert("Could not save quiz settings");
-    } finally {
-      setLoading(false);
-    }
-  };
+      const payload = {
+        week: parseInt(week, 10),
+        mindifficulty: settings.mindifficulty,
+        maxdifficulty: settings.maxdifficulty,
+        maxquestions: parseInt(settings.maxquestions, 10),
+        allowedretries: parseInt(settings.allowedretries, 10),
+        feedbackstyle: settings.feedbackstyle,
+        includespaced: settings.includespaced
+      };
 
+      const res = await fetch(`${BACKEND_URL}/api/quiz/settings/${quizId}`, {
+        method: "POST", // Using POST for Upsert (Create or Update)
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+
+      if (!res.ok) throw new Error("Failed to save");
+      
+      const savedData = await res.json();
+      setMessage({ type: "success", text: "Settings saved!" });
+      
+      // Update local state to match exactly what server returned
+      setSettings(prev => ({ ...prev, ...savedData }));
+
+    } catch (e) {
+      setMessage({ type: "error", text: "Error saving settings." });
+    } finally {
+      setSaving(false);
+      // Clear message after 3 seconds
+      setTimeout(() => setMessage(null), 3000);
+    }
+  }
+
+  // --- RENDER ---
   return (
-    <form onSubmit={handleSave} className="space-y-3 border p-4 rounded-md bg-gray-50">
-      <h3 className="font-semibold text-lg">Quiz Settings</h3>
-      <div className="grid grid-cols-2 gap-3">
-        <label className="flex flex-col text-sm">
-          Min difficulty
-          <select value={form.min_difficulty} onChange={updateField("min_difficulty")} className="border rounded px-2 py-1">
-            <option value="">(none)</option>
-            <option value="easy">Easy</option>
-            <option value="medium">Medium</option>
-            <option value="hard">Hard</option>
+    <div className="bg-white p-4 rounded-lg border border-gray-200 shadow-sm">
+      <h3 className="text-sm font-bold text-gray-800 uppercase tracking-wide mb-4 border-b pb-2">
+        Quiz Settings
+      </h3>
+
+      <div className="grid grid-cols-2 gap-4 mb-4">
+        {/* Difficulty Range */}
+        <div>
+          <label className="block text-xs font-semibold text-gray-500 mb-1">Min difficulty</label>
+          <select 
+            className="w-full text-sm border-gray-300 rounded-md shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+            value={settings.mindifficulty}
+            onChange={(e) => setSettings({...settings, mindifficulty: e.target.value})}
+          >
+            <option value="Easy">Easy</option>
+            <option value="Medium">Medium</option>
+            <option value="Hard">Hard</option>
           </select>
-        </label>
-        <label className="flex flex-col text-sm">
-          Max difficulty
-          <select value={form.max_difficulty} onChange={updateField("max_difficulty")} className="border rounded px-2 py-1">
-            <option value="">(none)</option>
-            <option value="easy">Easy</option>
-            <option value="medium">Medium</option>
-            <option value="hard">Hard</option>
+        </div>
+
+        <div>
+          <label className="block text-xs font-semibold text-gray-500 mb-1">Max difficulty</label>
+          <select 
+            className="w-full text-sm border-gray-300 rounded-md shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+            value={settings.maxdifficulty}
+            onChange={(e) => setSettings({...settings, maxdifficulty: e.target.value})}
+          >
+            <option value="Easy">Easy</option>
+            <option value="Medium">Medium</option>
+            <option value="Hard">Hard</option>
           </select>
-        </label>
-        <label className="flex flex-col text-sm">
-          Max questions
-          <input type="number" min="1" max="50" className="border rounded px-2 py-1" value={form.max_questions} onChange={updateField("max_questions")} />
-        </label>
-        <label className="flex flex-col text-sm">
-          Allowed retries
-          <input type="number" min="0" max="10" className="border rounded px-2 py-1" value={form.allowed_retries} onChange={updateField("allowed_retries")} />
-        </label>
-        <label className="flex flex-col text-sm col-span-2">
-          Feedback style
-          <select value={form.feedback_style} onChange={updateField("feedback_style")} className="border rounded px-2 py-1 w-full">
-            <option value="">(default)</option>
-            <option value="show_answer">Show correct answer</option>
-            <option value="hint_only">Hint only</option>
+        </div>
+
+        {/* Counts */}
+        <div>
+          <label className="block text-xs font-semibold text-gray-500 mb-1">Max questions</label>
+          <input 
+            type="number" 
+            min="1" max="50"
+            className="w-full text-sm border-gray-300 rounded-md shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+            value={settings.maxquestions}
+            onChange={(e) => setSettings({...settings, maxquestions: e.target.value})}
+          />
+        </div>
+
+        <div>
+          <label className="block text-xs font-semibold text-gray-500 mb-1">Allowed retries</label>
+          <input 
+            type="number" 
+            min="1" max="10"
+            className="w-full text-sm border-gray-300 rounded-md shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+            value={settings.allowedretries}
+            onChange={(e) => setSettings({...settings, allowedretries: e.target.value})}
+          />
+        </div>
+
+        {/* Style */}
+        <div className="col-span-2">
+          <label className="block text-xs font-semibold text-gray-500 mb-1">Feedback style</label>
+          <select 
+            className="w-full text-sm border-gray-300 rounded-md shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+            value={settings.feedbackstyle}
+            onChange={(e) => setSettings({...settings, feedbackstyle: e.target.value})}
+          >
+            <option value="Immediate">Immediate (Show after each question)</option>
+            <option value="Summary">Summary (Show only at end)</option>
           </select>
-        </label>
+        </div>
+
+        {/* Spaced Retrieval Toggle */}
+        <div className="col-span-2 flex items-center gap-2 mt-1">
+          <input 
+            type="checkbox" 
+            id={`spaced-${quizId}`}
+            className="rounded border-gray-300 text-blue-600 shadow-sm focus:ring-blue-500"
+            checked={settings.includespaced}
+            onChange={(e) => setSettings({...settings, includespaced: e.target.checked})}
+          />
+          <label htmlFor={`spaced-${quizId}`} className="text-sm text-gray-700 cursor-pointer select-none">
+            Include spaced-retrieval "old" concepts
+          </label>
+        </div>
       </div>
-      <label className="flex items-center gap-2 text-sm">
-        <input type="checkbox" checked={form.include_spaced} onChange={updateField("include_spaced")} />
-        Include spaced-retrieval "old" concepts
-      </label>
-      <button type="submit" disabled={loading} className="px-4 py-2 bg-black text-white rounded-lg text-sm hover:bg-gray-800 disabled:opacity-50 w-full">
-        {loading ? "Saving..." : "Save Settings"}
+
+      <button 
+        onClick={handleSave}
+        disabled={saving || loading}
+        className={`w-full py-2 px-4 rounded-md text-sm font-semibold text-white shadow-sm transition-all ${
+           saving ? "bg-gray-400 cursor-not-allowed" : "bg-black hover:bg-gray-800"
+        }`}
+      >
+        {saving ? "Saving..." : "Save Settings"}
       </button>
-      {saved && <span className="text-xs text-green-600 block mt-1">✓ Settings saved!</span>}
-    </form>
+
+      {message && (
+        <div className={`mt-3 text-xs text-center p-2 rounded ${
+          message.type === 'success' ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'
+        }`}>
+          {message.text}
+        </div>
+      )}
+    </div>
   );
 }

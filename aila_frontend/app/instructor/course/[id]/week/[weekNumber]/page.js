@@ -4,7 +4,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 
-// Adjust these paths if your folder structure is different
 import UploadLectureForm from "../../../../../components/UploadLectureForm";
 import ProcessingFileStatus from "../../../../../components/ProcessingFileStatus";
 import SlideViewer from "../../../../../components/SlideViewer";
@@ -201,7 +200,7 @@ function MCQCard({ q, i, knowledgeGraph, loadPreview }) {
             onClick={(e) => {
                e.stopPropagation();
                setIsEditing(true);
-               setIsOpen(true); // Open to show context while editing usually not needed but consistent
+               setIsOpen(true); 
             }}
             className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-gray-500 bg-gray-100 hover:bg-blue-50 hover:text-blue-600 rounded transition-colors"
             title="Edit Question"
@@ -278,7 +277,7 @@ function MCQCard({ q, i, knowledgeGraph, loadPreview }) {
                 return (
                   <div key={j} className={`flex items-start gap-3 p-3 rounded-lg border text-sm transition-all ${
                     isCorrect 
-                      ? "bg-green-50 border-green-200 ring-1 ring-green-100" // Highlight Correct Answer
+                      ? "bg-green-50 border-green-200 ring-1 ring-green-100" 
                       : "bg-white border-gray-100 text-gray-600 opacity-70"
                   }`}>
                     <div className={`mt-0.5 w-4 h-4 rounded-full border flex items-center justify-center flex-shrink-0 ${
@@ -354,7 +353,7 @@ export default function CourseWeekPage({ params }) {
            setKnowledgeGraph({ nodes: [], edges: [] });
            setActiveConceptId(null);
            setIsLoadingKG(false);
-           return; // Stop here, do not even fetch KG
+           return; 
        }
     } catch(e) {
         console.error("File check failed, continuing to KG fetch", e);
@@ -485,7 +484,6 @@ export default function CourseWeekPage({ params }) {
             );
             const data = await safeJson(res);
               
-            // --- NEW: INCREMENTAL UPDATE ---
             // If the backend has made progress (e.g. Phase 1 done > 10%), 
             // fetch the graph to show partial results (the Root Node).
             if (data.status === "processing" && data.progress >= 20) {

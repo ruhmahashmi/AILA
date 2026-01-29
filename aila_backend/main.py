@@ -1445,22 +1445,28 @@ async def delete_upload(uploadid: str = Form(...), db: Session = Depends(get_db)
     db.commit()
     return {"status": "deleted"}
 
-@app.get("/api/quiz/settings/{quiz_id}", response_model=Optional[QuizSettingsOut])
+@app.get("/api/quiz/settings/{quiz_id}", response_model=QuizSettingsOut)
 async def get_quiz_settings(quiz_id: str, db: Session = Depends(get_db)):
-    qs = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
+    qs = db.query(QuizSettings).filter(QuizSettings.quizid == quiz_id).first()
+    
     if not qs:
-        return None
-    return QuizSettingsOut(
-        id=qs.id,
-        quiz_id=quiz_id,
-        week=qs.week,
-        min_difficulty=qs.min_difficulty,
-        max_difficulty=qs.max_difficulty,
-        max_questions=qs.max_questions,
-        allowed_retries=qs.allowed_retries,
-        feedback_style=qs.feedback_style,
-        include_spaced=qs.include_spaced,
-    )
+        quiz = db.query(Quiz).filter(Quiz.id == quiz_id).first()
+        default_week = quiz.week if quiz else 1
+        
+        return QuizSettingsOut(
+            id=-1,              # Dummy ID to indicate unsaved
+            quizid=quiz_id,
+            week=default_week,
+            mindifficulty="Easy",
+            maxdifficulty="Hard",
+            maxquestions=10,    # Default to 10 questions
+            allowedretries=3,   # Default to 3 retries
+            feedbackstyle="Immediate",
+            includespaced=False
+        )
+
+    return qs
+
 
 @app.get("/api/quiz/questions/{quiz_id}")
 def get_quiz_questions(quiz_id: str, db: Session = Depends(get_db)):
@@ -1490,41 +1496,70 @@ def get_quiz_questions(quiz_id: str, db: Session = Depends(get_db)):
 
 
 @app.post("/api/quiz/settings/{quiz_id}", response_model=QuizSettingsOut)
-async def upsert_quiz_settings(
-    quiz_id: str,
-    payload: QuizSettingsIn,
-    db: Session = Depends(get_db),
-):
-    qs = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
+async def upsert_quiz_settings(quiz_id: str, payload: QuizSettingsIn, db: Session = Depends(get_db)):
+    """
+    Create or Update settings for a specific quiz.
+    Ensures default values are applied if fields are missing.
+    """
+    # 1. Try to find existing settings
+    qs = db.query(QuizSettings).filter(QuizSettings.quizid == quiz_id).first()
+    
+    # 2. If not found, create a new record
     if qs is None:
         qs = QuizSettings(
-            quiz_id=quiz_id,
+            quizid=quiz_id,
             week=payload.week,
+            # Apply defaults immediately on creation
+            mindifficulty=payload.mindifficulty or "Easy",
+            maxdifficulty=payload.maxdifficulty or "Hard",
+            maxquestions=payload.maxquestions if payload.maxquestions is not None else 10,
+            allowedretries=payload.allowedretries if payload.allowedretries is not None else 3,
+            feedbackstyle=payload.feedbackstyle or "Immediate",
+            includespaced=payload.includespaced
         )
         db.add(qs)
+    else:
+        # 3. If found, update existing record
+        qs.week = payload.week
+        
+        # Update logic: If payload has a value, use it. 
+        # If payload is None, keep existing. 
+        # If both are None (shouldn't happen), fallback to default.
+        if payload.mindifficulty:
+            qs.mindifficulty = payload.mindifficulty
+            
+        if payload.maxdifficulty:
+            qs.maxdifficulty = payload.maxdifficulty
+            
+        if payload.maxquestions is not None:
+            qs.maxquestions = payload.maxquestions
+            
+        if payload.allowedretries is not None:
+            qs.allowedretries = payload.allowedretries
+            
+        if payload.feedbackstyle:
+            qs.feedbackstyle = payload.feedbackstyle
+            
+        # Boolean field is simpler - just take the payload value
+        qs.includespaced = payload.includespaced
 
-    qs.week = payload.week
-    qs.min_difficulty = payload.min_difficulty
-    qs.max_difficulty = payload.max_difficulty
-    qs.max_questions = payload.max_questions
-    qs.allowed_retries = payload.allowed_retries
-    qs.feedback_style = payload.feedback_style
-    qs.include_spaced = payload.include_spaced
-
+    # 4. Commit and Refresh
     db.commit()
     db.refresh(qs)
-
+    
+    # 5. Return Pydantic model
     return QuizSettingsOut(
         id=qs.id,
-        quiz_id=quiz_id,
+        quizid=qs.quizid,
         week=qs.week,
-        min_difficulty=qs.min_difficulty,
-        max_difficulty=qs.max_difficulty,
-        max_questions=qs.max_questions,
-        allowed_retries=qs.allowed_retries,
-        feedback_style=qs.feedback_style,
-        include_spaced=qs.include_spaced,
+        mindifficulty=qs.mindifficulty,
+        maxdifficulty=qs.maxdifficulty,
+        maxquestions=qs.maxquestions,
+        allowedretries=qs.allowedretries,
+        feedbackstyle=qs.feedbackstyle,
+        includespaced=qs.includespaced
     )
+
 
 # --- A. Instructor preview: KG-based sample MCQs (no DB writes) ---
 @app.get("/api/quiz/preview")
