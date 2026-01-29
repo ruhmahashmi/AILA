@@ -238,6 +238,9 @@ class MCQUpdate(BaseModel):
 class GenerateQuizMCQsRequest(BaseModel):
     action: str = "generate_from_concepts"
 
+class TitleGenRequest(BaseModel):
+    concepts: List[str]
+
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
@@ -1560,6 +1563,32 @@ async def upsert_quiz_settings(quiz_id: str, payload: QuizSettingsIn, db: Sessio
         includespaced=qs.includespaced
     )
 
+@app.post("/api/quiz/generate-title")
+async def generate_quiz_title(payload: TitleGenRequest):
+    """
+    Generates a short, academic quiz title based on a list of concept names.
+    """
+    if not payload.concepts:
+        return {"title": "New Quiz"}
+
+    # Join concepts for the prompt
+    topics_str = ", ".join(payload.concepts)
+    
+    prompt = (
+        f"Generate a concise, academic quiz title (3-8 words) for a quiz covering these topics: {topics_str}. "
+        "Return ONLY the title text. Do not use quotes. Do not say 'Here is the title'."
+        "Examples: 'Introduction to Data Structures', 'Advanced Recursion Patterns', 'Memory Management Basics'."
+    )
+
+    try:
+        model = genai.GenerativeModel('models/gemini-2.5-flash')
+        response = model.generate_content(prompt)
+        title = response.text.strip().replace('"', '').replace("'", "")
+        return {"title": title}
+    except Exception as e:
+        print(f"Title Gen Error: {e}")
+        # Fallback if LLM fails
+        return {"title": f"Quiz: {payload.concepts[0]} & more"}
 
 # --- A. Instructor preview: KG-based sample MCQs (no DB writes) ---
 @app.get("/api/quiz/preview")
