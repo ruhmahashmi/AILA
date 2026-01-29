@@ -227,6 +227,13 @@ class MethodFilter(logging.Filter):
                 return True
             return False
         return False
+    
+
+class MCQUpdate(BaseModel):
+    question: str
+    options: List[str]
+    answer: str
+    difficulty: Optional[str] = "Medium"
 
 class GenerateQuizMCQsRequest(BaseModel):
     action: str = "generate_from_concepts"
@@ -1821,6 +1828,35 @@ async def start_student_quiz(
             "max_questions": max_q
         },
         "retries_left": max(0, allowed_retries - completed_attempts)
+    }
+
+@app.put("/api/mcq/{mcq_id}")
+async def update_mcq(mcq_id: str, payload: MCQUpdate, db: Session = Depends(get_db)):
+    """
+    Update an existing MCQ.
+    """
+    mcq = db.query(MCQ).filter(MCQ.id == mcq_id).first()
+    if not mcq:
+        raise HTTPException(status_code=404, detail="MCQ not found")
+    
+    mcq.question = payload.question
+    mcq.options = payload.options
+    mcq.answer = payload.answer
+    if payload.difficulty:
+        mcq.difficulty = payload.difficulty
+        
+    db.commit()
+    db.refresh(mcq)
+    
+    return {
+        "status": "updated",
+        "mcq": {
+            "id": mcq.id,
+            "question": mcq.question,
+            "options": mcq.options,
+            "answer": mcq.answer,
+            "difficulty": mcq.difficulty
+        }
     }
 
 

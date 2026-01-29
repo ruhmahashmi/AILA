@@ -25,12 +25,157 @@ async function safeJson(res) {
   }
 }
 
-// --- SUB-COMPONENT: MCQ CARD ---
+// --- SUB-COMPONENT: MCQ CARD (EDITABLE) ---
 function MCQCard({ q, i, knowledgeGraph, loadPreview }) {
   const [isOpen, setIsOpen] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
 
+  // Initialize edit state with current question data
+  const [editedData, setEditedData] = useState({
+    question: q.question,
+    options: Array.isArray(q.options) ? q.options : [],
+    answer: q.answer,
+    difficulty: q.difficulty || "Medium"
+  });
+
+  // Ensure options is always an array for rendering/editing
+  useEffect(() => {
+    let opts = q.options;
+    if (typeof opts === "string") {
+      try { opts = JSON.parse(opts); } catch (e) { opts = []; }
+    }
+    if (!Array.isArray(opts)) opts = [];
+    
+    setEditedData({
+      question: q.question,
+      options: opts,
+      answer: q.answer,
+      difficulty: q.difficulty || "Medium"
+    });
+  }, [q]);
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/mcq/${q.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(editedData)
+      });
+      if (!res.ok) throw new Error("Failed to update");
+      setIsEditing(false);
+      loadPreview(); // Refresh parent list
+    } catch (err) {
+      alert("Error saving: " + err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // --- EDIT MODE UI ---
+  if (isEditing) {
+    return (
+      <div className="p-5 border-2 border-blue-300 rounded-xl bg-blue-50/50 shadow-md mb-4 transition-all">
+        <div className="flex justify-between items-center mb-4">
+          <span className="text-xs font-bold text-blue-600 uppercase tracking-wide">Editing Question {i + 1}</span>
+        </div>
+
+        {/* Question Text Input */}
+        <div className="mb-4">
+          <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Question Text</label>
+          <textarea
+            className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm bg-white shadow-sm"
+            rows={3}
+            value={editedData.question}
+            onChange={(e) => setEditedData({...editedData, question: e.target.value})}
+          />
+        </div>
+
+        {/* Options Input */}
+        <div className="mb-4">
+          <label className="block text-xs font-bold text-gray-500 uppercase mb-2">
+            Options <span className="font-normal normal-case text-gray-400">(Select the correct answer)</span>
+          </label>
+          <div className="space-y-2">
+            {editedData.options.map((opt, idx) => (
+              <div key={idx} className="flex gap-2 items-center group">
+                <input
+                  type="radio"
+                  name={`correct-${q.id}`}
+                  checked={editedData.answer === opt}
+                  onChange={() => setEditedData({...editedData, answer: opt})}
+                  className="w-4 h-4 text-blue-600 cursor-pointer"
+                  title="Mark as correct answer"
+                />
+                <input
+                  className={`flex-1 p-2 border rounded-md text-sm transition-all shadow-sm ${
+                    editedData.answer === opt 
+                      ? 'border-green-500 ring-1 ring-green-500 bg-green-50/30' 
+                      : 'border-gray-300 bg-white focus:border-blue-400'
+                  }`}
+                  value={opt}
+                  onChange={(e) => {
+                    const newOpts = [...editedData.options];
+                    newOpts[idx] = e.target.value;
+                    // If we edit the text of the currently selected correct answer, update the answer field too
+                    const wasCorrect = (editedData.answer === opt);
+                    setEditedData({
+                      ...editedData, 
+                      options: newOpts,
+                      answer: wasCorrect ? e.target.value : editedData.answer
+                    });
+                  }}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Footer Actions */}
+        <div className="flex justify-between items-center pt-3 border-t border-blue-100">
+           <div className="flex items-center gap-2">
+             <label className="text-xs font-bold text-gray-500 uppercase">Difficulty:</label>
+             <select 
+                value={editedData.difficulty}
+                onChange={(e) => setEditedData({...editedData, difficulty: e.target.value})}
+                className="text-xs p-1.5 border border-gray-300 rounded bg-white focus:ring-1 focus:ring-blue-500 outline-none"
+             >
+                <option value="Easy">Easy</option>
+                <option value="Medium">Medium</option>
+                <option value="Hard">Hard</option>
+             </select>
+           </div>
+
+          <div className="flex gap-2">
+              <button 
+                onClick={() => setIsEditing(false)}
+                className="px-4 py-2 text-xs font-semibold text-gray-600 hover:bg-white hover:text-gray-800 rounded-lg transition-colors border border-transparent hover:border-gray-200"
+                disabled={saving}
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={handleSave}
+                className="px-4 py-2 text-xs font-semibold bg-blue-600 text-white hover:bg-blue-700 rounded-lg shadow-sm transition-all flex items-center gap-2"
+                disabled={saving}
+              >
+                {saving ? (
+                  <>
+                    <div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                    Saving...
+                  </>
+                ) : "Save Changes"}
+              </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // --- VIEW MODE UI ---
   return (
-    <div className={`p-5 border rounded-xl bg-white shadow-sm transition-all group relative ${isOpen ? "border-blue-200 ring-1 ring-blue-50" : "border-gray-200 hover:shadow-md hover:border-gray-300"}`}>
+    <div className={`p-5 border rounded-xl bg-white shadow-sm transition-all group relative mb-4 ${isOpen ? "border-blue-200 ring-1 ring-blue-50" : "border-gray-200 hover:shadow-md hover:border-gray-300"}`}>
       
       {/* Header: Number, Metadata & Actions */}
       <div className="flex justify-between items-start mb-2">
@@ -51,7 +196,19 @@ function MCQCard({ q, i, knowledgeGraph, loadPreview }) {
         </div>
         
         {/* Actions */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 opacity-100 sm:opacity-0 group-hover:opacity-100 transition-opacity">
+          <button
+            onClick={(e) => {
+               e.stopPropagation();
+               setIsEditing(true);
+               setIsOpen(true); // Open to show context while editing usually not needed but consistent
+            }}
+            className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-gray-500 bg-gray-100 hover:bg-blue-50 hover:text-blue-600 rounded transition-colors"
+            title="Edit Question"
+          >
+            ✏️ Edit
+          </button>
+          <div className="w-px h-4 bg-gray-200 mx-1"></div>
           <button
             onClick={async (e) => {
                e.stopPropagation();
@@ -81,8 +238,8 @@ function MCQCard({ q, i, knowledgeGraph, loadPreview }) {
 
       {/* Question Text (Click to Toggle) */}
       <div 
-        onClick={() => setIsOpen(!isOpen)}
-        className="cursor-pointer group-hover:text-blue-800 transition-colors"
+        onClick={() => !isEditing && setIsOpen(!isOpen)}
+        className="cursor-pointer group-hover:text-blue-900 transition-colors"
       >
         <p className="text-gray-900 font-medium text-lg leading-relaxed">{q.question}</p>
         
@@ -100,6 +257,7 @@ function MCQCard({ q, i, knowledgeGraph, loadPreview }) {
           <div className="h-px bg-gray-100 mb-4"></div>
           {(() => {
               let safeOptions = q.options;
+              // Handle case where options might come back as string from some legacy endpoints
               if (typeof safeOptions === "string") {
                   try { safeOptions = JSON.parse(safeOptions); } catch (e) {}
               }
@@ -111,7 +269,7 @@ function MCQCard({ q, i, knowledgeGraph, loadPreview }) {
                 
                 let isCorrect = optionStr === answerStr;
                 
-                // Fallback for "Answer: A" style
+                // Fallback for "Answer: A" style (legacy data support)
                 if (!isCorrect && answerStr.length === 1) {
                     const letters = ['A','B','C','D'];
                     if (letters[j] === answerStr) isCorrect = true;
@@ -146,10 +304,12 @@ function MCQCard({ q, i, knowledgeGraph, loadPreview }) {
   );
 }
 
+
 export default function CourseWeekPage({ params }) {
   const { id: courseId, weekNumber } = params;
   const router = useRouter();
   const week = Number(weekNumber);
+
 
   // --- STATE ---
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -159,18 +319,22 @@ export default function CourseWeekPage({ params }) {
   const [kgError, setKgError] = useState(null);
   const [isLoadingKG, setIsLoadingKG] = useState(true);
 
+
   const [activeConceptId, setActiveConceptId] = useState(null);
   const [processingFiles, setProcessingFiles] = useState([]);
+
 
   const [quizzes, setQuizzes] = useState([]);
   const [selectedQuizId, setSelectedQuizId] = useState(null);
   const [expandedQuizSettingsId, setExpandedQuizSettingsId] = useState(null); 
+
 
   const [quizStats, setQuizStats] = useState(null);
   const [quizPreview, setQuizPreview] = useState(null);
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [previewError, setPreviewError] = useState(null);
   const [filterDifficulty, setFilterDifficulty] = useState("All");
+
 
   // --- FETCHERS ---
   const fetchKnowledgeGraph = useCallback(async () => {
@@ -184,6 +348,7 @@ export default function CourseWeekPage({ params }) {
        const files = await fileRes.json();
        const weekFiles = Array.isArray(files) ? files.filter(f => String(f.week) === String(week)) : [];
 
+
        if (weekFiles.length === 0) {
            console.log("NUCLEAR FIX: No files found for week. Forcing graph wipe.");
            setKnowledgeGraph({ nodes: [], edges: [] });
@@ -195,6 +360,7 @@ export default function CourseWeekPage({ params }) {
         console.error("File check failed, continuing to KG fetch", e);
     }
     // -------------------------------------------------------------
+
 
     setIsLoadingKG(true);
     setKgError(null);
@@ -211,6 +377,7 @@ export default function CourseWeekPage({ params }) {
     }
   }, [courseId, week]);
 
+
   const fetchQuizzes = useCallback(async () => {
     if (!courseId || !Number.isFinite(week)) return;
     try {
@@ -221,6 +388,7 @@ export default function CourseWeekPage({ params }) {
       setQuizzes([]);
     }
   }, [courseId, week]);
+
 
   const loadPreview = useCallback(async () => {
     if (!selectedQuizId) return;
@@ -238,6 +406,7 @@ export default function CourseWeekPage({ params }) {
     }
   }, [selectedQuizId]);
 
+
   const fetchQuizStats = useCallback(async () => {
     if (!selectedQuizId) return;
     try {
@@ -246,13 +415,16 @@ export default function CourseWeekPage({ params }) {
     } catch(e) {}
   }, [selectedQuizId]);
 
+
   const handleProcessingStarted = useCallback((processingId, fileName) => {
     setProcessingFiles((prev) => [...prev, { processingId, fileName }]);
   }, []);
 
+
   const handleConceptSelect = useCallback((conceptId) => {
     setActiveConceptId(conceptId);
   }, []);
+
 
   // --- ACTIONS ---
   const generateQuizMCQs = async () => {
@@ -273,11 +445,13 @@ export default function CourseWeekPage({ params }) {
     }
   };
 
+
   // --- EFFECTS ---
   useEffect(() => {
     fetchKnowledgeGraph();
     fetchQuizzes();
   }, [fetchKnowledgeGraph, fetchQuizzes]);
+
 
   // Auto-select first concept
   useEffect(() => {
@@ -285,6 +459,7 @@ export default function CourseWeekPage({ params }) {
       setActiveConceptId(knowledgeGraph.nodes.find(n => n.isRoot)?.id || knowledgeGraph.nodes[0].id);
     }
   }, [knowledgeGraph.nodes, activeConceptId]);
+
 
   // Refresh preview when quiz changes
   useEffect(() => {
@@ -295,10 +470,12 @@ export default function CourseWeekPage({ params }) {
     }
   }, [selectedQuizId, loadPreview, fetchQuizStats]);
 
-  // Polling
+
+
+  // Polling Effect
   useEffect(() => {
     if (processingFiles.length === 0) return;
-
+  
     const interval = setInterval(async () => {
       const results = await Promise.all(
         processingFiles.map(async (f) => {
@@ -307,32 +484,41 @@ export default function CourseWeekPage({ params }) {
               `${BACKEND_URL}/api/lecture-status?processing_id=${f.processingId}`
             );
             const data = await safeJson(res);
+              
+            // --- NEW: INCREMENTAL UPDATE ---
+            // If the backend has made progress (e.g. Phase 1 done > 10%), 
+            // fetch the graph to show partial results (the Root Node).
+            if (data.status === "processing" && data.progress >= 20) {
+                fetchKnowledgeGraph(); 
+            }
+              
             return { ...data, processingId: f.processingId };
           } catch {
             return { status: "error", processingId: f.processingId };
           }
         })
       );
-
+  
       const doneJobs = results.filter((r) => r.status === "done");
-
+  
+      // Handle Done Jobs
       if (doneJobs.length > 0) {
-        // 1. Remove from processing list
         setProcessingFiles((prev) =>
           prev.filter((p) => !doneJobs.some((d) => d.processingId === p.processingId))
         );
-
-        // 2. Refresh immediately
+  
         setTimeout(() => {
           fetchKnowledgeGraph();
           fetchQuizzes();
-          setRefreshTrigger((prev) => prev + 1); 
+          setRefreshTrigger((prev) => prev + 1);
         }, 1000);
       }
-    }, 3000);
-
+    }, 2000); // Poll every 2 seconds for snappier updates
+  
     return () => clearInterval(interval);
   }, [processingFiles, fetchKnowledgeGraph, fetchQuizzes]);
+  
+
 
   // --- RENDER HELPERS ---
   const activeConcept = knowledgeGraph.nodes?.find(n => n.id === activeConceptId) || null;
@@ -344,11 +530,13 @@ export default function CourseWeekPage({ params }) {
   const hardCount = allMcqs.filter(m => m.difficulty === "Hard").length;
   const totalCount = allMcqs.length;
 
+
   const visibleQuestions = allMcqs.filter(m => filterDifficulty === "All" || (m.difficulty || "Medium") === filterDifficulty);
   
   const questionCountLabel = !loadingPreview && totalCount > 0 
     ? `(${totalCount} total • ${easyCount} Easy, ${mediumCount} Medium, ${hardCount} Hard)`
     : "";
+
 
   return (
     <div className="flex h-screen bg-gray-50 overflow-hidden font-sans text-gray-900">
@@ -378,6 +566,7 @@ export default function CourseWeekPage({ params }) {
         </div>
       </div>
 
+
       {/* MAIN SCROLLABLE AREA */}
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-[1600px] mx-auto p-6 space-y-8 pb-20">
@@ -393,6 +582,7 @@ export default function CourseWeekPage({ params }) {
                <p className="text-sm text-gray-400 mt-1 font-mono">ID: {courseId}</p>
             </div>
           </div>
+
 
             {/* TWO-COLUMN LAYOUT: UPLOAD & FILES LIST */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch">
@@ -418,6 +608,7 @@ export default function CourseWeekPage({ params }) {
               </div>
             </div>
 
+
             {/* RIGHT: File List */}
             <div className="h-full">
               <div className="bg-white rounded-2xl shadow-md border border-gray-200 h-full min-h-[200px] flex flex-col">
@@ -436,6 +627,7 @@ export default function CourseWeekPage({ params }) {
             </div>
           </div>
 
+
           {/* Processing Status */}
           {processingFiles.length > 0 && (
             <div className="bg-blue-50 border border-blue-200 rounded-xl p-5 mb-6">
@@ -452,15 +644,30 @@ export default function CourseWeekPage({ params }) {
           
           {/* CONCEPT GRAPH */}
           <div className="bg-white rounded-2xl shadow-lg border border-gray-200 overflow-hidden relative">
+              
+              {/* Header - Outside the relative container for clean separation */}
               <div className="p-4 bg-gradient-to-r from-blue-50 to-indigo-50 border-b flex justify-between items-center">
-              <h3 className="font-semibold text-gray-800">🧠 Concept Map</h3>
-              <div className="flex items-center gap-2">
-                  {isLoadingKG && <span className="text-xs text-blue-500 animate-pulse">Updating...</span>}
-                  <span className="text-xs text-gray-500 bg-white px-2 py-1 rounded border">Interactive</span>
+                  <h3 className="font-semibold text-gray-800">🧠 Concept Map</h3>
+                  <div className="flex items-center gap-2">
+                      {isLoadingKG && <span className="text-xs text-blue-500 animate-pulse">Updating...</span>}
+                      <span className="text-xs text-gray-500 bg-white px-2 py-1 rounded border">Interactive</span>
+                  </div>
               </div>
-              </div>
-              <div className="h-[500px]">
-                  {/* FORCE RE-MOUNT when nodes become empty */}
+
+
+              {/* Graph Container */}
+              <div className="h-[500px] relative bg-white"> 
+                  
+                  {/* Loading Overlay - Shows only during the "Root -> Full Graph" transition */}
+                  {processingFiles.length > 0 && knowledgeGraph.nodes.length > 0 && knowledgeGraph.nodes.length < 5 && (
+                      <div className="absolute top-4 right-4 z-20 bg-white/90 backdrop-blur border border-blue-200 text-blue-700 px-3 py-1.5 rounded-full text-xs font-semibold shadow-sm flex items-center gap-2 animate-pulse transition-all">
+                          <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce"></div>
+                          Expanding Universe...
+                      </div>
+                  )}
+
+
+                  {/* The Graph Itself */}
                   {knowledgeGraph.nodes.length > 0 ? (
                       <ConceptGraph 
                           key={JSON.stringify(knowledgeGraph.nodes)} 
@@ -478,6 +685,7 @@ export default function CourseWeekPage({ params }) {
               </div>
           </div>
 
+
           {/* REST OF PAGE */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 h-[700px]">
              {/* LEFT: Concept Details */}
@@ -487,6 +695,7 @@ export default function CourseWeekPage({ params }) {
                    <SlideViewer concept={activeConcept} courseId={courseId} week={weekNumber} />
                 </div>
              </div>
+
 
              {/* RIGHT: Quiz Creator */}
              <div className="bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col overflow-hidden">
@@ -504,6 +713,7 @@ export default function CourseWeekPage({ params }) {
              </div>
           </div>
 
+
           {/* QUIZ MANAGER SECTION */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start pt-4 border-t border-gray-200 min-h-[600px]">
              
@@ -516,6 +726,7 @@ export default function CourseWeekPage({ params }) {
                
                <div className="p-4 space-y-4 flex-1">
                  {quizzes.length === 0 && <p className="text-gray-400 italic text-sm text-center py-10">No quizzes created yet.</p>}
+
 
                  {quizzes.map((q, idx) => {
                    const isSelected = selectedQuizId === q.id;
@@ -548,6 +759,7 @@ export default function CourseWeekPage({ params }) {
                </div>
              </div>
 
+
              {/* RIGHT COLUMN: Question Bank Review */}
              <div className="lg:col-span-8 h-[600px]">
                {selectedQuizId ? (
@@ -572,6 +784,7 @@ export default function CourseWeekPage({ params }) {
                               else if (lvl === "Easy") count = easyCount;
                               else if (lvl === "Medium") count = mediumCount;
                               else if (lvl === "Hard") count = hardCount;
+
 
                               return (
                                 <button
@@ -602,6 +815,7 @@ export default function CourseWeekPage({ params }) {
                           </button>
                        </div>
                     </div>
+
 
                     <div className="p-6 bg-gray-50/50 flex-1 overflow-y-auto custom-scrollbar">
                        {previewError && <div className="bg-red-50 text-red-600 p-4 rounded mb-4 text-sm border border-red-200">{previewError}</div>}
