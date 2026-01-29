@@ -1482,23 +1482,21 @@ async def delete_upload(uploadid: str = Form(...), db: Session = Depends(get_db)
 
 @app.get("/api/quiz/settings/{quiz_id}", response_model=QuizSettingsOut)
 async def get_quiz_settings(quiz_id: str, db: Session = Depends(get_db)):
-    # 1. Fetch from DB (try both attribute names to be safe)
+    # 1. Fetch from DB
+    qs = None
     try:
         qs = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
     except AttributeError:
         qs = db.query(QuizSettings).filter(QuizSettings.quizid == quiz_id).first()
     
-    # 2. If no settings exist, create defaults
+    # 2. Defaults if not found
     if not qs:
         quiz = db.query(Quiz).filter(Quiz.id == quiz_id).first()
         default_week = quiz.week if quiz else 1
-        
-        # RETURN DICT: Pydantic will validate this against its schema
-        # We provide BOTH keys so whichever one Pydantic wants, it finds.
         return {
             "id": -1,
-            "quizid": quiz_id,   # Case A
-            "quiz_id": quiz_id,  # Case B (Pydantic likely wants this)
+            "quizid": quiz_id,
+            "quiz_id": quiz_id,
             "week": default_week,
             "mindifficulty": "Easy",
             "maxdifficulty": "Hard",
@@ -1508,104 +1506,151 @@ async def get_quiz_settings(quiz_id: str, db: Session = Depends(get_db)):
             "includespaced": False
         }
 
-    # 3. If settings exist, return them
-    # Safely get the ID from the SQLAlchemy object
-    q_id_val = getattr(qs, 'quiz_id', getattr(qs, 'quizid', quiz_id))
-    
+    # 3. Safe Attribute Access (Handle underscore vs no underscore)
+    def get_attr(obj, name, default=None):
+        return getattr(obj, name, getattr(obj, name.replace("_", ""), getattr(obj, name.replace("min", "min_").replace("max", "max_"), default)))
+
+    # Get values safely
+    q_id_val = get_attr(qs, 'quiz_id', getattr(qs, 'quizid', quiz_id))
+    min_d = get_attr(qs, 'mindifficulty')
+    max_d = get_attr(qs, 'maxdifficulty')
+    max_q = get_attr(qs, 'maxquestions')
+    retries = get_attr(qs, 'allowedretries')
+    style = get_attr(qs, 'feedbackstyle')
+    spaced = get_attr(qs, 'includespaced')
+
     return {
         "id": qs.id,
         "quizid": q_id_val,
         "quiz_id": q_id_val,
         "week": qs.week,
-        "mindifficulty": qs.mindifficulty,
-        "maxdifficulty": qs.maxdifficulty,
-        "maxquestions": qs.maxquestions,
-        "allowedretries": qs.allowedretries,
-        "feedbackstyle": qs.feedbackstyle,
-        "includespaced": qs.includespaced
+        "mindifficulty": min_d,
+        "maxdifficulty": max_d,
+        "maxquestions": max_q,
+        "allowedretries": retries,
+        "feedbackstyle": style,
+        "includespaced": spaced
     }
-
-
-@app.get("/api/quiz/questions/{quiz_id}")
-def get_quiz_questions(quiz_id: str, db: Session = Depends(get_db)):
-    result = db.execute(
-        sql_text("SELECT id, question, options, answer, concept_id, difficulty FROM mcqs WHERE quiz_id = :quiz_id"),
-        {"quiz_id": quiz_id}
-    ).fetchall()
-    
-    mcqs = []
-    for row in result:
-        # Handle JSON options safely
-        try:
-            opts = json.loads(row[2]) if isinstance(row[2], str) else row[2]
-        except:
-            opts = []
-
-        mcqs.append({
-            "id": row[0],
-            "question": row[1],
-            "options": opts,
-            "answer": row[3],
-            "concept_id": row[4],
-            "difficulty": row[5] or "Medium"  # <--- FALLBACK HERE
-        })
-    print(f"🎉 Quiz {quiz_id} + {len(mcqs)} MCQs SAVED")
-    return {"mcqs": mcqs}
-
 
 @app.post("/api/quiz/settings/{quiz_id}", response_model=QuizSettingsOut)
 async def upsert_quiz_settings(quiz_id: str, payload: QuizSettingsIn, db: Session = Depends(get_db)):
-    # 1. Find existing
+    # 1. Fetch existing
+    qs = None
     try:
         qs = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
     except AttributeError:
         qs = db.query(QuizSettings).filter(QuizSettings.quizid == quiz_id).first()
     
-    # 2. Create if new
+    # Helper to get value from Pydantic payload safely
+    def get_payload_val(p, name):
+        # Pydantic models might have 'min_difficulty' or 'mindifficulty'
+        val = getattr(p, name, None)
+        if val is None:
+             val = getattr(p, name.replace("min", "min_").replace("max", "max_"), None)
+        return val
+
+    # Extract values from payload
+    p_week = payload.week
+    p_min = get_payload_val(payload, 'mindifficulty')
+    p_max = get_payload_val(payload, 'maxdifficulty')
+    p_maxq = get_payload_val(payload, 'maxquestions')
+    p_retries = get_payload_val(payload, 'allowedretries')
+    p_style = get_payload_val(payload, 'feedbackstyle')
+    p_spaced = get_payload_val(payload, 'includespaced')
+    
+    # 2. Create New
     if qs is None:
         qs = QuizSettings(
-            week=payload.week,
-            mindifficulty=payload.mindifficulty or "Easy",
-            maxdifficulty=payload.maxdifficulty or "Hard",
-            maxquestions=payload.maxquestions if payload.maxquestions is not None else 10,
-            allowedretries=payload.allowedretries if payload.allowedretries is not None else 3,
-            feedbackstyle=payload.feedbackstyle or "Immediate",
-            includespaced=payload.includespaced
+            week=p_week,
+            # Assigning attributes dynamically to handle SQLAlchemy model differences
         )
-        # Assign FK safely
-        if hasattr(QuizSettings, 'quiz_id'):
-            qs.quiz_id = quiz_id
-        else:
-            qs.quizid = quiz_id
+        # Manually set attributes to handle naming variations
+        if hasattr(QuizSettings, 'quiz_id'): qs.quiz_id = quiz_id
+        else: qs.quizid = quiz_id
+        
+        if hasattr(qs, 'mindifficulty'): qs.mindifficulty = p_min or "Easy"
+        else: qs.min_difficulty = p_min or "Easy"
+        
+        if hasattr(qs, 'maxdifficulty'): qs.maxdifficulty = p_max or "Hard"
+        else: qs.max_difficulty = p_max or "Hard"
+        
+        if hasattr(qs, 'maxquestions'): qs.maxquestions = p_maxq if p_maxq is not None else 10
+        else: qs.max_questions = p_maxq if p_maxq is not None else 10
+        
+        if hasattr(qs, 'allowedretries'): qs.allowedretries = p_retries if p_retries is not None else 3
+        else: qs.allowed_retries = p_retries if p_retries is not None else 3
+        
+        if hasattr(qs, 'feedbackstyle'): qs.feedbackstyle = p_style or "Immediate"
+        else: qs.feedback_style = p_style or "Immediate"
+        
+        if hasattr(qs, 'includespaced'): qs.includespaced = p_spaced
+        else: qs.include_spaced = p_spaced
+
         db.add(qs)
+    
+    # 3. Update Existing
     else:
-        # 3. Update existing
-        qs.week = payload.week
-        qs.mindifficulty = payload.mindifficulty or qs.mindifficulty or "Easy"
-        qs.maxdifficulty = payload.maxdifficulty or qs.maxdifficulty or "Hard"
-        qs.maxquestions = payload.maxquestions if payload.maxquestions is not None else qs.maxquestions
-        qs.allowedretries = payload.allowedretries if payload.allowedretries is not None else qs.allowedretries
-        qs.feedbackstyle = payload.feedbackstyle or qs.feedbackstyle or "Immediate"
-        qs.includespaced = payload.includespaced
+        qs.week = p_week
+        
+        def update_attr(obj, name, val, default):
+            target = name
+            if not hasattr(obj, name):
+                target = name.replace("min", "min_").replace("max", "max_").replace("feedback", "feedback_").replace("allowed", "allowed_").replace("include", "include_")
+            
+            current = getattr(obj, target, default)
+            setattr(obj, target, val if val is not None else current)
+
+        update_attr(qs, 'mindifficulty', p_min, "Easy")
+        update_attr(qs, 'maxdifficulty', p_max, "Hard")
+        update_attr(qs, 'maxquestions', p_maxq, 10)
+        update_attr(qs, 'allowedretries', p_retries, 3)
+        update_attr(qs, 'feedbackstyle', p_style, "Immediate")
+        update_attr(qs, 'includespaced', p_spaced, False)
 
     db.commit()
     db.refresh(qs)
     
-    # 4. Return Dict with both key variations
+    # 4. Return safely
+    def get_final_attr(obj, name):
+        return getattr(obj, name, getattr(obj, name.replace("min", "min_").replace("max", "max_").replace("feedback", "feedback_").replace("allowed", "allowed_").replace("include", "include_"), None))
+
     q_id_val = getattr(qs, 'quiz_id', getattr(qs, 'quizid', quiz_id))
-    
+
     return {
         "id": qs.id,
         "quizid": q_id_val,
         "quiz_id": q_id_val,
         "week": qs.week,
-        "mindifficulty": qs.mindifficulty,
-        "maxdifficulty": qs.maxdifficulty,
-        "maxquestions": qs.maxquestions,
-        "allowedretries": qs.allowedretries,
-        "feedbackstyle": qs.feedbackstyle,
-        "includespaced": qs.includespaced
+        "mindifficulty": get_final_attr(qs, 'mindifficulty'),
+        "maxdifficulty": get_final_attr(qs, 'maxdifficulty'),
+        "maxquestions": get_final_attr(qs, 'maxquestions'),
+        "allowedretries": get_final_attr(qs, 'allowedretries'),
+        "feedbackstyle": get_final_attr(qs, 'feedbackstyle'),
+        "includespaced": get_final_attr(qs, 'includespaced')
     }
+
+@app.get("/api/quiz/questions/{quiz_id}")
+def get_quiz_questions(quiz_id: str, db: Session = Depends(get_db)):
+    # Use ORM to fetch MCQs safely
+    try:
+        # Try fetching by quiz_id (standard)
+        mcqs = db.query(MCQ).filter(MCQ.quiz_id == quiz_id).all()
+    except AttributeError:
+        # Try fetching by quizid (legacy)
+        mcqs = db.query(MCQ).filter(MCQ.quizid == quiz_id).all()
+        
+    out = []
+    for m in mcqs:
+        out.append({
+            "id": m.id,
+            "question": m.question,
+            "options": m.options,
+            "answer": m.answer,
+            "concept_id": m.concept_id,
+            "difficulty": m.difficulty or "Medium"
+        })
+        
+    return {"quiz_id": quiz_id, "mcqs": out}
 
 @app.post("/api/quiz/generate-title")
 async def generate_quiz_title(payload: TitleGenRequest):
@@ -1716,42 +1761,59 @@ async def lock_preview(payload: LockPreviewPayload, db: Session = Depends(get_db
 
 @app.post("/api/quiz/generate-mcqs/{quiz_id}")
 async def generate_quiz_mcqs(quiz_id: str, payload: GenerateQuizMCQsRequest, db: Session = Depends(get_db)):
+    print(f"[DEBUG] Starting generation for Quiz: {quiz_id}")
+    
     quiz = db.query(Quiz).filter(Quiz.id == quiz_id).first()
     if not quiz or not quiz.concept_ids:
         return {"quiz_id": quiz_id, "generated_mcqs": 0, "message": "No concepts"}
 
     count = 0
-    target_concepts = quiz.concept_ids[:3] 
+    target_concepts = quiz.concept_ids[:5]
 
     for cid in target_concepts:
         kg_payload = {
-            "course_id": quiz.course_id,
+            "course_id": quiz.course_id,  # Assuming course_id (check model!)
             "week": quiz.week,
             "concept_id": cid,
-            "quiz_id": quiz.id  
+            "quiz_id": quiz.id
         }
         
+        # Handle course_id vs courseid mismatch in payload preparation if needed
+        # (The generate_mcqs_kg function we fixed earlier handles the reading part)
+
         try:
             gen_resp = await generate_mcqs_kg(kg_payload, db)
             new_mcqs = gen_resp.get("mcqs", [])
+            print(f"[DEBUG] Generated {len(new_mcqs)} MCQs for concept {cid}")
             
             for m in new_mcqs:
-                db.add(MCQ(
+                # Create MCQ object
+                new_mcq = MCQ(
                     id=str(uuid.uuid4()),
-                    quiz_id=quiz.id,
                     concept_id=cid,
                     question=m.get("question"),
-                    options=m.get("options"), 
+                    options=m.get("options"),
                     answer=m.get("answer"),
                     difficulty=m.get("difficulty", "Medium")
-                ))
+                )
+                
+                # Assign FK safely
+                if hasattr(MCQ, 'quiz_id'):
+                    new_mcq.quiz_id = quiz.id
+                else:
+                    new_mcq.quizid = quiz.id
+                    
+                db.add(new_mcq)
                 count += 1
         except Exception as e:
-            print(f"Error generating for {cid}: {e}")
+            print(f"[ERROR] Failed to save MCQs for {cid}: {e}")
             continue
 
     db.commit()
+    print(f"🎉 Quiz {quiz.id} + {count} MCQs SAVED")
+    
     return {"quiz_id": quiz.id, "generated_mcqs": count}
+
 
 
 @app.delete("/api/mcq/{mcq_id}")
@@ -1971,32 +2033,37 @@ async def update_mcq(mcq_id: str, payload: MCQUpdate, db: Session = Depends(get_
 @app.post("/api/student/quiz/submit")
 async def submit_quiz_attempt(
     attempt_id: str = Body(..., embed=True),
-    responses: dict = Body(..., embed=True), # {mcq_id: "selected_option"}
+    responses: dict = Body(..., embed=True),
     db: Session = Depends(get_db)
 ):
     attempt = db.query(QuizAttempt).filter(QuizAttempt.id == attempt_id).first()
     if not attempt:
         raise HTTPException(status_code=404, detail="Attempt not found")
-    
-    # Check if already submitted
-    if attempt.score is not None:
-        # Return existing results if user double-submits
-        # (You might want to fetch and recalculate or just return stored state)
-        pass 
 
-    # Get Settings for Feedback Style
-    settings = db.query(QuizSettings).filter(QuizSettings.quiz_id == attempt.quiz_id).first()
-    style = settings.feedback_style if settings else "default"
-    
-    results = []
     score = 0
-    total = len(responses) # Or total questions in quiz? Better to use len(responses) for now.
+    total = 0
+    results = []
     
+    # Fetch Settings for style
+    settings = None
+    try:
+        settings = db.query(QuizSettings).filter(QuizSettings.quiz_id == attempt.quiz_id).first()
+    except:
+        settings = db.query(QuizSettings).filter(QuizSettings.quizid == attempt.quiz_id).first()
+        
+    def get_setting(obj, name, default):
+        if not obj: return default
+        val = getattr(obj, name, getattr(obj, name.replace("feedback", "feedback_"), None))
+        return val if val is not None else default
+
+    style = get_setting(settings, 'feedbackstyle', "Immediate")
+
+    # Iterate responses
     for mcq_id, selected_opt in responses.items():
+        total += 1
         mcq = db.query(MCQ).filter(MCQ.id == mcq_id).first()
         
-        # Handle case where MCQ might be deleted or invalid
-        if not mcq: 
+        if not mcq:
             results.append({
                 "mcq_id": mcq_id,
                 "selected": selected_opt,
@@ -2004,40 +2071,53 @@ async def submit_quiz_attempt(
                 "error": "Question not found"
             })
             continue
-        
-        is_correct = (selected_opt == mcq.answer)
-        if is_correct: score += 1
-        
+
+        # --- ROBUST CHECK LOGIC (Same as check-answer) ---
+        stored_ans = (mcq.answer or "").strip()
+        user_ans = (selected_opt or "").strip()
+        is_correct = stored_ans.lower() == user_ans.lower()
+
+        # Legacy Fallback
+        if not is_correct and len(stored_ans) == 1 and stored_ans.upper() in ['A', 'B', 'C', 'D']:
+            try:
+                options_list = mcq.options
+                if isinstance(options_list, str):
+                    options_list = json.loads(options_list)
+                
+                if isinstance(options_list, list):
+                    idx = ord(stored_ans.upper()) - 65
+                    if 0 <= idx < len(options_list):
+                        correct_text = str(options_list[idx]).strip()
+                        if correct_text.lower() == user_ans.lower():
+                            is_correct = True
+            except:
+                pass
+        # ------------------------------------------------
+
+        if is_correct:
+            score += 1
+            
         feedback_item = {
             "mcq_id": mcq_id,
-            "selected": selected_opt, # <--- THIS IS CRITICAL FOR "Skipped" FIX
+            "selected": selected_opt,
             "correct": is_correct
         }
         
-        # Apply Feedback Settings
-        if style == "none":
-            # No hint, no answer
-            pass 
-        elif style == "hint":
-            # Only hint if wrong
-            if not is_correct:
-                # You can store specific hints in DB, or generate generic one
-                feedback_item["hint"] = f"Review the concept: {mcq.concept_id or 'General'}"
-        else: # "default" or "full"
-            # Show correct answer
-            feedback_item["correct_answer"] = mcq.answer
-            
+        # If Summary mode or finished, maybe show correct answer?
+        # Usually we return it so frontend can display "Correct Answer was: X"
+        feedback_item["correct_answer"] = mcq.answer 
+
         results.append(feedback_item)
-        
-    # Save to DB
+
+    # Update Attempt in DB
     attempt.score = score
     attempt.responses = responses # Save raw JSON map
     db.commit()
-    
+
     return {
         "score": score,
         "total": total,
-        "results": results, 
+        "results": results,
         "style": style
     }
 
@@ -2049,49 +2129,69 @@ async def check_answer_mcq(
     attempt_count: int = Body(1, embed=True),
     db: Session = Depends(get_db)
 ):
-    # 1. Get Question & Settings
+    # 1. Fetch Question
     mcq = db.query(MCQ).filter(MCQ.id == mcq_id).first()
-    settings = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
-    
     if not mcq:
         raise HTTPException(status_code=404, detail="Question not found")
 
-    # 2. Normalize Settings
-    # Handle "Hint only", "Hint", "hint", etc. by normalizing string
-    raw_style = settings.feedback_style if settings else "default"
-    style = raw_style.lower().strip() 
+    # 2. Fetch Settings safely
+    settings = None
+    try:
+        settings = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
+    except AttributeError:
+        settings = db.query(QuizSettings).filter(QuizSettings.quizid == quiz_id).first()
+
+    # SAFE ATTRIBUTE ACCESS HELPER
+    def get_setting(obj, name, default):
+        if not obj: return default
+        # Try: name, name_with_underscore, default
+        val = getattr(obj, name, getattr(obj, name.replace("feedback", "feedback_").replace("allowed", "allowed_"), None))
+        return val if val is not None else default
+
+    raw_style = get_setting(settings, 'feedbackstyle', "Immediate")
+    style = raw_style.lower().strip()
+    max_retries = get_setting(settings, 'allowedretries', 3)
+
+    # 3. ROBUST ANSWER CHECKING
+    stored_ans = (mcq.answer or "").strip()
+    user_ans = (selected_opt or "").strip()
     
-    max_retries = settings.allowed_retries if settings else 3
-    is_correct = (mcq.answer == selected_opt)
-    
+    is_correct = stored_ans.lower() == user_ans.lower()
+
+    # Legacy Fallback (A/B/C/D)
+    if not is_correct and len(stored_ans) == 1 and stored_ans.upper() in ['A', 'B', 'C', 'D']:
+        try:
+            options_list = mcq.options
+            if isinstance(options_list, str):
+                options_list = json.loads(options_list)
+            
+            if isinstance(options_list, list):
+                idx = ord(stored_ans.upper()) - 65
+                if 0 <= idx < len(options_list):
+                    correct_text = str(options_list[idx]).strip()
+                    if correct_text.lower() == user_ans.lower():
+                        is_correct = True
+        except Exception as e:
+            print(f"Legacy answer check failed: {e}")
+
+    # 4. Construct Response
     response = {
         "correct": is_correct,
         "style": raw_style,
         "retries_exhausted": False
     }
 
-    # 3. Logic for Incorrect Answers
     if not is_correct:
-        # Check if attempts are strictly LESS than max (e.g., attempt 1 of 3, 2 of 3)
-        # If attempt_count == max_retries, they just used their last try.
-        if attempt_count < max_retries:
-            response["retries_exhausted"] = False
-            
-            # --- ROBUST STYLE CHECK ---
-            # Checks if "hint" is anywhere in the setting name (e.g. "Hint only")
+        if attempt_count >= max_retries:
+            response["retries_exhausted"] = True
+            response["correct_answer"] = mcq.answer 
+            response["hint"] = "No more retries."
+        else:
             if "hint" in style:
                 concept_text = mcq.concept_id if mcq.concept_id else "course concepts"
-                response["hint"] = f"Review: {concept_text}"
-            
-            # Default behavior (Immediate Feedback) often just says "Incorrect"
-            elif "default" in style or "immediate" in style:
-                response["hint"] = "Incorrect. Try again."
-                
-        else:
-            # Last attempt used -> Exhausted
-            response["retries_exhausted"] = True
-            response["correct_answer"] = mcq.answer
-            response["hint"] = "No more retries."
+                response["hint"] = f"Review {concept_text}"
+            else:
+                 response["hint"] = "Incorrect. Try again."
 
     return response
 
