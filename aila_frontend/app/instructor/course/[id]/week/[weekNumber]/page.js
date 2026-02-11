@@ -315,6 +315,8 @@ export default function CourseWeekPage({ params }) {
   // eslint-disable-next-line no-unused-vars
   const [kgError, setKgError] = useState(null);
   const [isLoadingKG, setIsLoadingKG] = useState(true);
+  const [availableGraphs, setAvailableGraphs] = useState([]); // List of {id, type, name}
+  const [selectedGraphId, setSelectedGraphId] = useState("master"); 
 
   const [activeConceptId, setActiveConceptId] = useState(null);
   const [processingFiles, setProcessingFiles] = useState([]);
@@ -322,7 +324,7 @@ export default function CourseWeekPage({ params }) {
   const [quizzes, setQuizzes] = useState([]);
   const [selectedQuizId, setSelectedQuizId] = useState(null);
   const [expandedQuizSettingsId, setExpandedQuizSettingsId] = useState(null); 
-  const [deletingQuizId, setDeletingQuizId] = useState(null); // <--- NEW STATE FOR DELETE
+  const [deletingQuizId, setDeletingQuizId] = useState(null); 
 
   const [quizStats, setQuizStats] = useState(null);
   const [quizPreview, setQuizPreview] = useState(null);
@@ -331,38 +333,56 @@ export default function CourseWeekPage({ params }) {
   const [filterDifficulty, setFilterDifficulty] = useState("All");
 
   // --- FETCHERS ---
-  const fetchKnowledgeGraph = useCallback(async () => {
+
+  const fetchAvailableGraphs = useCallback(async () => {
     if (!courseId || !Number.isFinite(week)) return;
     try {
-       const fileRes = await fetch(`${BACKEND_URL}/api/lecture-history/?course_id=${courseId}&t=${Date.now()}`);
-       const files = await fileRes.json();
-       const weekFiles = Array.isArray(files) ? files.filter(f => String(f.week) === String(week)) : [];
-
-       if (weekFiles.length === 0) {
-           console.log("No files found for week. Forcing graph wipe.");
-           setKnowledgeGraph({ nodes: [], edges: [] });
-           setActiveConceptId(null);
-           setIsLoadingKG(false);
-           return; 
-       }
-    } catch(e) {
-        console.error("File check failed, continuing to KG fetch", e);
+      const res = await fetch(`${BACKEND_URL}/api/knowledge-graph/list?course_id=${courseId}&week=${week}`);
+      if (res.ok) {
+        const data = await safeJson(res);
+        setAvailableGraphs(Array.isArray(data) ? data : []);
+      }
+    } catch (e) {
+      console.error("Failed to fetch graph list", e);
     }
+  }, [courseId, week]);
+  
+  const fetchKnowledgeGraph = useCallback(async () => {
+    if (!courseId || !Number.isFinite(week)) return;
 
     setIsLoadingKG(true);
     setKgError(null);
+
     try {
-      const res = await fetch(`${BACKEND_URL}/api/knowledge-graph?courseid=${courseId}&week=${week}&t=${Date.now()}`, { cache: "no-store" });
+      // Refresh the list of options every time we fetch the main graph
+      // (This ensures if a new file finished processing, it appears in the list)
+      fetchAvailableGraphs();
+
+      let url = `${BACKEND_URL}/api/knowledge-graph?courseid=${courseId}&week=${week}&t=${Date.now()}`;
+      
+      // Append selection filter
+      if (selectedGraphId === "master") {
+         url += `&graph_type=master`;
+      } else {
+         // Assuming selectedGraphId is the 'source_file' name for simplicity
+         // or the specific row ID
+         url += `&graph_type=file&source_file=${encodeURIComponent(selectedGraphId)}`;
+      }
+
+      const res = await fetch(url, { cache: "no-store" });
       if (!res.ok) throw new Error("KG Load Failed");
       const data = await safeJson(res);
+      
       setKnowledgeGraph({ nodes: data?.nodes || [], edges: data?.edges || [] });
+      
     } catch (e) {
       setKgError(e.message);
       setKnowledgeGraph({ nodes: [], edges: [] });
     } finally {
       setIsLoadingKG(false);
     }
-  }, [courseId, week]);
+  }, [courseId, week, selectedGraphId, fetchAvailableGraphs]); // Added fetchAvailableGraphs to deps
+
 
   const fetchQuizzes = useCallback(async () => {
     if (!courseId || !Number.isFinite(week)) return;
@@ -649,13 +669,24 @@ export default function CourseWeekPage({ params }) {
           <div className="bg-white rounded-2xl shadow-lg border border-gray-200 overflow-hidden relative">
               
               {/* Header */}
-              <div className="p-4 bg-gradient-to-r from-blue-50 to-indigo-50 border-b flex justify-between items-center">
-                  <h3 className="font-semibold text-gray-800">🧠 Concept Map</h3>
-                  <div className="flex items-center gap-2">
-                      {isLoadingKG && <span className="text-xs text-blue-500 animate-pulse">Updating...</span>}
-                      <span className="text-xs text-gray-500 bg-white px-2 py-1 rounded border">Interactive</span>
-                  </div>
-              </div>
+              <div className="flex items-center gap-3">
+                <h3 className="font-semibold text-gray-800">🧠 Concept Map</h3>
+                
+                {availableGraphs.length > 1 && (
+                    <select 
+                        value={selectedGraphId} 
+                        onChange={(e) => setSelectedGraphId(e.target.value)}
+                        className="text-xs py-1 px-2 border border-gray-300 rounded bg-white text-gray-700 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-200"
+                    >
+                        {availableGraphs.map(g => (
+                            <option key={g.id} value={g.id}>
+                                {g.type === 'master' ? '🌐 ' : '📄 '}
+                                {g.name}
+                            </option>
+                        ))}
+                    </select>
+                )}
+            </div>
 
               {/* Graph Container */}
               <div className="h-[500px] relative bg-white"> 

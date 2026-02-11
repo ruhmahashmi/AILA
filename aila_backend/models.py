@@ -24,8 +24,14 @@ class KnowledgeGraph(Base):
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     course_id = Column(String, index=True)
     week = Column(Integer)
-    node_data = Column(Text)  # JSON string of nodes
-    edge_data = Column(Text)  # JSON string of edges
+    
+    # --- THESE LINES ARE CRITICAL ---
+    graph_type = Column(String, default="master") 
+    source_file = Column(String, nullable=True)   
+    # --------------------------------
+    
+    node_data = Column(Text)
+    edge_data = Column(Text)
 
 class Segment(Base):
     __tablename__ = "segments"

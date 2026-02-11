@@ -17,6 +17,7 @@ from sqlalchemy import text as sqltext
 from sqlalchemy import text
 from sqlalchemy import and_
 from pydantic import BaseModel, Field
+from llama_index.llms.gemini import Gemini
 from pptx import Presentation
 from typing import List
 from collections import deque, defaultdict
@@ -35,6 +36,9 @@ import re
 import logging
 import google.generativeai as genai
 from collections import deque
+
+UPLOAD_DIR = "db/uploads"  
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
 
@@ -300,60 +304,129 @@ def get_db():
 def on_startup():
     Base.metadata.create_all(bind=engine)
 
-KEYWORD_BLACKLIST = set([
-    'slide','slides','page','pages','chapter','section',
-    'introduction','summary','conclusion','example','diagram',
-    'content','topic','concept','question','answer', '',
-    'ppt','presentation'
-])
-
-def is_good_keyword(word):
-    word = word.strip().lower()
-    if not word or len(word) < 2:
-        return False
-    if re.fullmatch(r'[\d\W]+', word):  # only numbers or punctuation
-        return False
-    BLACKLIST = set(['slide', 'slides', 'page', 'pages', 'chapter', 'section', 'untitled'])
-    BLACKLIST.update(KEYWORD_BLACKLIST)  # Merge for stricter check
-    if word in BLACKLIST:
-        return False
-    if len(word.split()) > 4:  
-        return False
-    if len(word) > 30:  
-        return False
-    return True
-
-
-def clean_title(title):
-    if not title or not title.strip():
-        return None
-    title = title.strip()
-    title = re.sub(r'^(slide|page|chapter|section)[\s\-_]*\d*[:.\s-]*', '', title, flags=re.I)
-    title = re.sub(r'[\s\-_]*(slide|page|chapter|section)[\s\-_]*\d*\s*$', '', title, flags=re.I)
-    title_clean = title.strip()
-    if not title_clean or title_clean.lower() in KEYWORD_BLACKLIST:
-        return None
-    if len(title_clean) < 3 or re.fullmatch(r'\d+', title_clean):
-        return None
-    title_clean = re.sub(r'^[-:\s]+', '', title_clean)
-    return title_clean.strip() or None
-
 def normalize_id(text):
     """Make sure every concept has the EXACT same ID everywhere"""
     return re.sub(r'\W+', '_', text.strip().lower()).strip('_')
 
-def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, processing_id):
-    from llama_index.llms.gemini import Gemini
-    import json
-    import uuid
-    import os
-    import fitz  # PyMuPDF
-    from pptx import Presentation
-    from collections import defaultdict
-    import re
-    import traceback
-    from sqlalchemy import text as sql_text # Ensure this import exists
+# --- HELPER: ROBUST JSON PARSER ---
+def repair_json(json_str):
+    """
+    Attempts to fix common JSON errors from LLMs.
+    """
+    try:
+        return json.loads(json_str)
+    except:
+        pass
+        
+    # Remove markdown code blocks
+    clean = json_str.replace("```json", "").replace("```", "").strip()
+    
+    # Try finding the outer braces
+    start = clean.find("{")
+    end = clean.rfind("}") + 1
+    if start != -1 and end != 0:
+        clean = clean[start:end]
+        
+    try:
+        return json.loads(clean)
+    except:
+        # Last resort: Try to fix trailing commas
+        try:
+            clean = re.sub(r",\s*}", "}", clean)
+            clean = re.sub(r",\s*]", "]", clean)
+            return json.loads(clean)
+        except:
+            print(f"[JSON ERROR] Failed to parse: {clean[:100]}...")
+            return {}
 
+# --- HELPER: STEP 1 - STRUCTURE IDENTIFICATION ---
+def identify_structure(llm, full_text, file_name):
+    """
+    First Pass: Identify just the high-level outline to ensure breadth.
+    """
+    print(f"🧠 [PASS 1] Identifying structure for {file_name}...")
+    
+    prompt = f"""
+    Analyze lecture slides "{file_name}".
+    
+    GOAL: List ONLY the top-level topics (Chapters/Sections).
+    
+    RULES:
+    1. If title is "4 Principles", list all 4.
+    2. If title is "Stacks and Queues", list "Stacks" and "Queues".
+    3. Ignore "Introduction" and "Summary".
+    
+    Return JSON:
+    {{
+        "main_topic": "The single overarching subject",
+        "sub_topics": ["Topic 1", "Topic 2", "Topic 3"]
+    }}
+    
+    Context:
+    {full_text[:15000]} 
+    """
+    
+    resp = llm.complete(prompt)
+    return repair_json(str(resp))
+
+# --- HELPER: STEP 2 - CONCEPT EXTRACTION ---
+def extract_concepts(llm, structure, full_text):
+    main_topic = structure.get("main_topic", "Lecture")
+    sub_topics = structure.get("sub_topics", [])
+    
+    print(f"🧠 [PASS 2] Extracting consolidated concepts for: {sub_topics}")
+    
+    prompt = f"""
+    You are an expert Computer Science Curriculum Designer.
+    
+    TASK: Convert the lecture content for "{main_topic}" into a CLEAN, MINIMAL concept map.
+    
+    STRICT CONSTRAINT: You may generate AT MOST 4-6 concepts per sub-topic.
+    
+    MERGE RULES (CRITICAL):
+    1. MERGE all "Operations" into ONE node.
+       - BAD: "Push", "Pop", "Peek", "Is_Empty" (4 nodes)
+       - GOOD: "Stack Operations" (1 node, summary mentions push/pop/peek)
+       
+    2. MERGE all "Implementation Details" into ONE node.
+       - BAD: "List Implementation", "Linked List Implementation", "O(1) Performance", "Top at End"
+       - GOOD: "Stack Implementation Strategies" (1 node, summary covers list/linked/complexity)
+       
+    3. MERGE all "Properties/Definitions" into ONE node.
+       - BAD: "LIFO", "Ordered Collection", "Reversal Property"
+       - GOOD: "Stack Properties" (1 node, summary explains LIFO)
+
+    BANNED NODES:
+    - "Chapter Objectives", "Self Check", "Summary", "Introduction"
+    - "Methods Used", "Performance Impact" (Too generic)
+    - "What is a...?" (Questions are not concepts)
+
+    Return JSON:
+    {{
+        "nodes": [ 
+            {{ 
+                "id": "StackOps", 
+                "label": "Stack Operations", 
+                "type": "structure", 
+                "summary": "Core methods: push, pop, peek, size, is_empty.", 
+                "slide_nums": [3,4,5] 
+            }} 
+        ],
+        "edges": [
+            {{ "source": "{main_topic}", "target": "StackOps", "relation": "defines behavior" }}
+        ]
+    }}
+    
+    Context:
+    {full_text[:25000]}
+    """
+    
+    resp = llm.complete(prompt)
+    return repair_json(str(resp))
+
+
+# --- MAIN PIPELINE FUNCTION ---
+def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, processing_id):
     db = SessionLocal()
     llm = Gemini(model="models/gemini-2.5-flash") 
 
@@ -364,7 +437,7 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
         })
         db.commit()
 
-        # ---------- 1. Extract Slides (Restore Segments) ----------
+        # ---------- 1. Extract Slides (Robust Text Extraction) ----------
         segments_data = []
         ext = os.path.splitext(filepath)[-1].lower()
         
@@ -385,8 +458,8 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
         if not segments_data:
             raise ValueError("No readable slides found")
 
-        # Save Segments to DB (CRITICAL FOR QUIZZES & PREVIEW)
-        print("[PROCESS] Saving segments to DB...")
+        # Save Segments
+        print(f"[PROCESS] Saving {len(segments_data)} segments...")
         for seg in segments_data:
             new_seg = Segment(
                 id=str(uuid.uuid4()),
@@ -396,163 +469,133 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
                 segment_index=seg["slide_num"],
                 title=f"Slide {seg['slide_num']}", 
                 content=seg["text"],
-                keywords="", # Will populate via graph mapping below
+                keywords="", 
                 summary=""
             )
             db.add(new_seg)
         db.commit()
 
-        # Prepare context for Graph LLM (Limit to ~30k chars)
-        full_text = "\n\n".join([f"--- Slide {s['slide_num']} ---\n{s['text']}" for s in segments_data])[:30000]
+        # Prepare Text (With Chunking Safety Check)
+        full_text = "\n\n".join([f"--- Slide {s['slide_num']} ---\n{s['text']}" for s in segments_data])
+        if len(full_text) > 30000:
+            print("⚠️ [WARN] Text > 30k chars. Truncating safely.")
+            full_text = full_text[:30000]
 
-        # ---------- 2. GENERATE GRAPH (Hierarchy + Summaries) ----------
-        print("[KG LOGIC] Generating graph...")
-        db.query(LectureProcessing).filter(LectureProcessing.id == processing_id).update({"progress": 50})
-        db.commit()
+        # ---------- 2. TWO-PASS GENERATION ----------
         
-        prompt = f"""
-        You are an expert computer science instructor. Analyze the following lecture slides from "{file_name}".
+        # Pass 1: Identify Structure
+        structure = identify_structure(llm, full_text, file_name)
+        if not structure:
+             # Fallback structure if LLM fails
+             structure = {"main_topic": file_name, "sub_topics": []}
+             
+        # Pass 2: Extract Concepts based on Structure
+        graph_data = extract_concepts(llm, structure, full_text)
         
-        GOAL: Build a hierarchical concept map and extract metadata.
+        main_topic = structure.get("main_topic", file_name)
+        raw_nodes = graph_data.get("nodes", [])
+        raw_edges = graph_data.get("edges", [])
+
+        # ---------- 3. PROCESS & CLEAN ----------
         
-        STEP 1: Identify the SINGLE main topic (e.g., "Stacks").
-        STEP 2: Identify sub-concepts (nodes) and their parent-child relationships (edges).
-        STEP 3: Write a 1-sentence definition (summary) for each concept.
-        STEP 4: For each concept, list the "slide_numbers" where it is explicitly discussed (look for "--- Slide X ---").
-
-        Return valid JSON:
-        {{
-            "main_topic": "The single overarching topic",
-            "nodes": [
-                {{ 
-                    "id": "Concept Name", 
-                    "label": "Display Label", 
-                    "summary": "Definition...", 
-                    "slide_nums": [1, 3] 
-                }}
-            ],
-            "edges": [
-                {{ "source": "Parent ID", "target": "Child ID", "relation": "..." }}
-            ]
-        }}
-
-        RULES:
-        - "main_topic" is the root.
-        - All nodes must connect to the tree.
-        - slide_nums must be integers found in the text.
-
-        Context:
-        {full_text}
-        """
-
-        response = llm.complete(prompt)
-        cleaned_text = str(response).replace("```json", "").replace("```", "").strip()
+        # Filter Junk
+        clean_nodes = []
+        clean_ids = set()
+        for n in raw_nodes:
+            lbl = n.get('label', '').lower()
+            if any(x in lbl for x in ["init", "self.", "print(", "error", "summary", "intro"]):
+                continue
+            clean_nodes.append(n)
+            clean_ids.add(n['id'])
+            
+        clean_edges = [e for e in raw_edges if e['source'] in clean_ids and e['target'] in clean_ids]
         
-        try:
-            data = json.loads(cleaned_text)
-        except:
-            # Fallback cleanup if JSON is messy
-            start = cleaned_text.find("{")
-            end = cleaned_text.rfind("}") + 1
-            if start != -1 and end != 0:
-                data = json.loads(cleaned_text[start:end])
-            else:
-                raise ValueError("LLM returned invalid JSON")
+        print(f"📊 [GRAPH] Main: {main_topic} | Nodes: {len(clean_nodes)}")
 
-        # ---------- 3. Process & Save Graph ----------
-        main_topic = data.get("main_topic", file_name)
-        raw_nodes = data.get("nodes", [])
-        raw_edges = data.get("edges", [])
+        # Compute Hierarchy
+        final_nodes, final_edges = compute_levels(clean_nodes, clean_edges, explicit_root=main_topic)
 
-        print(f"[KG LOGIC] Main Topic: {main_topic}")
-
-        # Fix Hierarchy (Using your existing helper)
-        final_nodes, final_edges = compute_levels(raw_nodes, raw_edges, explicit_root=main_topic)
-
-        # --- RESTORE CONTENT CONTEXT (Crucial for Quiz Generation) ---
+        # Restore Content Context
         slide_text_map = {s["slide_num"]: s["text"] for s in segments_data}
-
         for node in final_nodes:
-            # 1. Gather text from all slides where this concept appears
             s_nums = node.get("slide_nums", [])
             gathered_text = []
-            
-            # Ensure s_nums is a list of ints
-            if isinstance(s_nums, (int, str)): s_nums = [int(s_nums)]
+            if isinstance(s_nums, (int, str)): s_nums = [int(s_nums)] if isinstance(s_nums, int) or (isinstance(s_nums, str) and s_nums.isdigit()) else []
             
             for num in s_nums:
                 if num in slide_text_map:
                     gathered_text.append(slide_text_map[num])
-            
-            # 2. Save content context to node (Limit to 1500 chars)
             node["contents"] = "\n...\n".join(gathered_text)[:1500]
-            
-            # 3. Update Segment Keywords (For Search)
-            if s_nums:
-                label_safe = node.get("label", "").replace("'", "''")
-                
-                # --- FIX: Dynamically build placeholders for IN clause ---
-                placeholders = ",".join([":s" + str(i) for i in range(len(s_nums))])
-                params = {"c": course_id, "w": week}
-                
-                # Add individual params for the IN clause
-                for i, num in enumerate(s_nums):
-                    params[f"s{i}"] = num
-                
-                query = f"""
-                    UPDATE segments 
-                    SET keywords = keywords || '{label_safe}, ' 
-                    WHERE course_id=:c AND week=:w AND segment_index IN ({placeholders})
-                """
-                
-                db.execute(sql_text(query), params)
-                
-                # Update Segment Title (First slide of concept gets the concept name)
-                first_slide = s_nums[0]
-                db.execute(
-                    sql_text("UPDATE segments SET title = :t WHERE course_id=:c AND week=:w AND segment_index=:i AND title LIKE 'Slide %'"),
-                    {"t": node["label"], "c": course_id, "w": week, "i": first_slide}
-                )
 
-                
-                # Update Segment Title (First slide of concept gets the concept name)
-                first_slide = s_nums[0]
-                db.execute(
-                    sql_text("UPDATE segments SET title = :t WHERE course_id=:c AND week=:w AND segment_index=:i AND title LIKE 'Slide %'"),
-                    {"t": node["label"], "c": course_id, "w": week, "i": first_slide}
-                )
+        # ---------- 4. SAVE & MERGE ----------
         
+        # A. Save FILE Graph
+        node_json = json.dumps(final_nodes)
+        edge_json = json.dumps(final_edges)
+        
+        db.execute(
+            sql_text("""
+                INSERT INTO knowledge_graph (id, course_id, week, node_data, edge_data, graph_type, source_file) 
+                VALUES (:id, :c, :w, :n, :e, 'file', :fname)
+            """),
+            {
+                "id": str(uuid.uuid4()), "c": course_id, "w": week, 
+                "n": node_json, "e": edge_json, "fname": file_name
+            }
+        )
         db.commit()
 
-        # ---------- 4. Save Knowledge Graph ----------
-        existing_kg = db.execute(
-            sql_text("SELECT id FROM knowledge_graph WHERE course_id=:c AND week=:w"),
+        # B. Merge
+        print(f"🔄 [MERGE] Merging into Week {week} Master Graph...")
+        
+        all_files = db.execute(
+            sql_text("SELECT node_data, edge_data FROM knowledge_graph WHERE course_id=:c AND week=:w AND graph_type='file'"),
+            {"c": course_id, "w": week}
+        ).fetchall()
+        
+        graphs_to_merge = []
+        for row in all_files:
+            try:
+                graphs_to_merge.append({
+                    "nodes": json.loads(row[0]),
+                    "edges": json.loads(row[1])
+                })
+            except:
+                continue
+        
+        # Use our Robust Merge
+        master_data = merge_graphs(graphs_to_merge, week)
+        
+        # Update/Create Master
+        master_node_json = json.dumps(master_data['nodes'])
+        master_edge_json = json.dumps(master_data['edges'])
+        
+        existing_master = db.execute(
+            sql_text("SELECT id FROM knowledge_graph WHERE course_id=:c AND week=:w AND graph_type='master'"),
             {"c": course_id, "w": week}
         ).fetchone()
 
-        node_json = json.dumps(final_nodes)
-        edge_json = json.dumps(final_edges)
-
-        if existing_kg:
+        if existing_master:
             db.execute(
                 sql_text("UPDATE knowledge_graph SET node_data=:n, edge_data=:e WHERE id=:id"),
-                {"n": node_json, "e": edge_json, "id": existing_kg[0]}
+                {"n": master_node_json, "e": master_edge_json, "id": existing_master[0]}
             )
         else:
             db.execute(
-                sql_text("INSERT INTO knowledge_graph (id, course_id, week, node_data, edge_data) VALUES (:id, :c, :w, :n, :e)"),
-                {"id": str(uuid.uuid4()), "c": course_id, "w": week, "n": node_json, "e": edge_json}
+                sql_text("INSERT INTO knowledge_graph (id, course_id, week, node_data, edge_data, graph_type) VALUES (:id, :c, :w, :n, :e, 'master')"),
+                {"id": str(uuid.uuid4()), "c": course_id, "w": week, "n": master_node_json, "e": master_edge_json}
             )
+        db.commit()
 
         # Finish
         db.query(LectureProcessing).filter(LectureProcessing.id == processing_id).update({
             "status": "done", "progress": 100
         })
         db.commit()
-        print(f"[KG COMPLETE] Saved {len(final_nodes)} nodes with content context.")
+        print(f"✅ [COMPLETE] Saved & Merged.")
 
     except Exception as e:
-        print(f"[KG ERROR] {str(e)}")
+        print(f"❌ [ERROR] {str(e)}")
         traceback.print_exc()
         db.query(LectureProcessing).filter(LectureProcessing.id == processing_id).update({
             "status": "error", "progress": 0, "error_message": str(e)[:500]
@@ -562,37 +605,73 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
         db.close()
 
 
+
+
 def compute_levels(nodes, edges, explicit_root=None):
-    """
-    Forces a strict hierarchy where 'explicit_root' is Level 0.
-    Connects any disconnected nodes to the root to prevent 'islands'.
-    """
-    node_map = {n["id"]: n for n in nodes}
+    # 1. Normalize Node IDs (strip spaces, lower case check)
+    # Create a map of "clean_label" -> "real_id"
+    label_to_id = {}
+    for n in nodes:
+        label_to_id[n['id']] = n['id']
+        if 'label' in n:
+            label_to_id[n['label']] = n['id']
+            # Add normalized versions for fuzzy matching
+            label_to_id[n['label'].lower().strip()] = n['id']
+            label_to_id[n['id'].lower().strip()] = n['id']
+
+    # 2. Repair Edges (Fix ID mismatches)
+    valid_edges = []
+    for e in edges:
+        src = e.get('source')
+        tgt = e.get('target')
+        
+        # Try to find real IDs
+        real_src = label_to_id.get(src) or label_to_id.get(src.lower().strip())
+        real_tgt = label_to_id.get(tgt) or label_to_id.get(tgt.lower().strip())
+        
+        if real_src and real_tgt:
+            valid_edges.append({
+                "source": real_src, 
+                "target": real_tgt, 
+                "relation": e.get("relation", "related")
+            })
     
-    # 1. Ensure the Explicit Root exists in the node list
+    # Update edges list
+    edges = valid_edges
+
+    # 3. Ensure Explicit Root
+    node_map = {n["id"]: n for n in nodes}
     if explicit_root:
         if explicit_root not in node_map:
-            root_node = {"id": explicit_root, "label": explicit_root, "isRoot": True}
-            nodes.append(root_node)
-            node_map[explicit_root] = root_node
-        else:
-            # Force existing node to be root
-            node_map[explicit_root]["isRoot"] = True
+            # Maybe the root ID changed during fuzzy match?
+            # Try to find a node that looks like the root
+            found = False
+            for nid in node_map:
+                if nid.lower() == explicit_root.lower():
+                    explicit_root = nid
+                    found = True
+                    break
+            
+            if not found:
+                # Create it if truly missing
+                root_node = {"id": explicit_root, "label": explicit_root, "isRoot": True}
+                nodes.append(root_node)
+                node_map[explicit_root] = root_node
+        
+        node_map[explicit_root]["isRoot"] = True
 
-    # 2. Build Adjacency List
+    # 4. BFS (Standard)
     adj = defaultdict(list)
     for e in edges:
         adj[e["source"]].append(e["target"])
 
-    # 3. BFS to Assign Levels from Root
-    levels = {node_id: -1 for node_id in node_map} # -1 means unvisited
-    
-    # Start BFS from the explicit root
+    levels = {node_id: -1 for node_id in node_map}
     queue = deque()
+    
     if explicit_root and explicit_root in node_map:
         queue.append((explicit_root, 0))
     else:
-        # Fallback: Find topological roots (nodes with no incoming edges)
+        # Fallback for no explicit root
         incoming = defaultdict(int)
         for e in edges: incoming[e["target"]] += 1
         topo_roots = [n["id"] for n in nodes if incoming[n["id"]] == 0]
@@ -604,47 +683,113 @@ def compute_levels(nodes, edges, explicit_root=None):
     while queue:
         curr, depth = queue.popleft()
         levels[curr] = depth
-        
         for child in adj[curr]:
             if child not in visited:
                 visited.add(child)
                 queue.append((child, depth + 1))
-    
-    # 4. Handle Disconnected Nodes (Orphans)
-    # Force connect any unvisited nodes to the Root
+
+    # 5. Rescue Orphans (But try to attach to NEAREST sibling first?)
+    # For now, stick to Root attach, but since we fixed the edges above, 
+    # fewer nodes should be orphans.
     new_edges = []
     if explicit_root:
         for node in nodes:
-            node_id = node["id"]
-            if node_id != explicit_root and levels[node_id] == -1:
-                # Create a "Related" edge so it appears in the graph
+            nid = node["id"]
+            if nid != explicit_root and levels[nid] == -1:
                 new_edges.append({
                     "source": explicit_root,
-                    "target": node_id,
+                    "target": nid,
                     "relation": "related concept"
                 })
-                # Set level to 1 (direct child of root)
-                levels[node_id] = 1
-                node["isRoot"] = False 
+                levels[nid] = 1
+                node["isRoot"] = False
 
-    # 5. Finalize Node Objects
+    # 6. Finalize
     for node in nodes:
         node["level"] = levels.get(node["id"], 1)
-        node["isRoot"] = (node["id"] == explicit_root) if explicit_root else (node.get("level") == 0)
-        
-        # Optional: Add type for frontend styling
-        if node["isRoot"]:
-            node["type"] = "root"
-        else:
-            node["type"] = "concept"
+        node["isRoot"] = (node["id"] == explicit_root)
+        if node["isRoot"]: node["type"] = "root"
+        elif "type" not in node: node["type"] = "concept"
 
-    # Combine original edges with new "rescue" edges
     final_edges = edges + new_edges
-    
-    # Sort nodes so Root is always first (helps some frontend parsers)
     nodes.sort(key=lambda x: x["level"])
     
     return nodes, final_edges
+
+
+    
+def merge_graphs(graphs_list, week_number):
+    merged_nodes = {}
+    merged_edges = []
+    seen_edges = set()
+    
+    # 1. Create Week Root (Level 0)
+    week_root_id = f"Week {week_number} Overview"
+    week_root = {
+        "id": week_root_id,
+        "label": f"Week {week_number} Concepts",
+        "isRoot": True,
+        "level": 0,
+        "type": "root",
+        "summary": "Overview of all topics."
+    }
+    merged_nodes[week_root_id] = week_root
+
+    for g in graphs_list:
+        local_nodes = {n['id']: n for n in g.get('nodes', [])}
+        local_edges = g.get('edges', [])
+        
+        # 2. Find File Root
+        file_root_id = None
+        for nid, node in local_nodes.items():
+            if node.get('isRoot') or node.get('level') == 0:
+                file_root_id = nid
+                break
+        
+        # 3. BFS to Shift Levels (Crucial Step)
+        # If FileRoot moves to Level 1, its children move to Level 2, etc.
+        if file_root_id:
+            queue = deque([(file_root_id, 1)]) # Start at Level 1
+            visited = {file_root_id}
+            
+            # Build adjacency
+            adj = defaultdict(list)
+            for e in local_edges:
+                adj[e['source']].append(e['target'])
+            
+            while queue:
+                curr, new_lvl = queue.popleft()
+                if curr in local_nodes:
+                    local_nodes[curr]['level'] = new_lvl
+                    local_nodes[curr]['isRoot'] = False # Demote from root
+                
+                for child in adj[curr]:
+                    if child not in visited:
+                        visited.add(child)
+                        queue.append((child, new_lvl + 1))
+
+        # 4. Merge Nodes
+        for node in local_nodes.values():
+            if node['id'] not in merged_nodes:
+                merged_nodes[node['id']] = node
+        
+        # 5. Merge Edges
+        for edge in local_edges:
+            sig = (edge['source'], edge['target'])
+            if sig not in seen_edges:
+                seen_edges.add(sig)
+                merged_edges.append(edge)
+                
+        # 6. Connect File Root -> Week Root
+        if file_root_id and (week_root_id, file_root_id) not in seen_edges:
+            merged_edges.append({
+                "source": week_root_id,
+                "target": file_root_id,
+                "relation": "topic"
+            })
+            seen_edges.add((week_root_id, file_root_id))
+
+    return {"nodes": list(merged_nodes.values()), "edges": merged_edges}
 
 
 def extract_mcqs_from_response(resp):
@@ -684,61 +829,103 @@ def extract_mcqs_from_response(resp):
     print("[MCQ PARSE ERROR] Response is neither str nor list nor dict:", type(resp))
     return []
 
-def pick_next_concept(concept_ids, responses, include_spaced):
-    # concept_ids: all quiz concepts
-    # responses: {mcq_id: {"concept_id": "...", "correct": bool}}
+def pick_next_concept(concept_ids, responses, graph_nodes_map, include_spaced=True):
+    """
+    Intelligent Selection based on Type & Hierarchy.
+    
+    Priority Order:
+    1. Unseen 'structure' or 'root' concepts (Foundational)
+    2. Unseen 'algorithm' or 'concept' (Core material)
+    3. Unseen 'detail' or 'example' (Nuance)
+    4. Review (Spaced Repetition)
+    """
+    # 1. Identify what's seen vs unseen
+    seen_ids = {r.get("concept_id") for r in responses.values() if r.get("concept_id")}
+    unseen_ids = [c for c in concept_ids if c not in seen_ids]
 
-    if not include_spaced or not responses:
-        # default behavior: your existing selection logic
-        return random.choice(concept_ids)
+    # 2. Define Type Weights (Lower number = Higher Priority)
+    type_priority = {
+        "root": 0,
+        "structure": 1,
+        "algorithm": 1,
+        "concept": 2,
+        "application": 3,
+        "detail": 4,
+        "example": 5,
+        "trivia": 6
+    }
 
-    # separate “current focus” vs “review” concept pools
-    seen_concepts = {r.get("concept_id") for r in responses.values() if r.get("concept_id")}
-    unseen = [c for c in concept_ids if c not in seen_concepts]
-    review_candidates = list(seen_concepts) or concept_ids
+    # 3. Helper to get priority score
+    def get_score(cid):
+        node = graph_nodes_map.get(cid, {})
+        # Use 'type' if available, otherwise fallback to 'concept'
+        ctype = node.get("type", "concept").lower()
+        # Add a tiny random float (0.0-0.9) to shuffle items within the same tier
+        return type_priority.get(ctype, 3) + random.random()
 
-    # 20–30% chance to pull a review concept
-    if random.random() < 0.3:
-        return random.choice(review_candidates)
-    if unseen:
-        return random.choice(unseen)
+    # 4. Pick Best Unseen
+    if unseen_ids:
+        # Sort by priority score (ascending)
+        unseen_ids.sort(key=get_score)
+        return unseen_ids[0]
+
+    # 5. Review Mode (If all unseen are done)
+    if include_spaced and seen_ids:
+        # 30% chance to pick a harder concept to review, 70% random
+        if random.random() < 0.3:
+            # Pick a 'structure' or 'algorithm' to review
+            high_value_seen = [cid for cid in seen_ids if graph_nodes_map.get(cid, {}).get('type') in ['structure', 'algorithm']]
+            if high_value_seen:
+                return random.choice(high_value_seen)
+        
+        return random.choice(list(seen_ids))
+
     return random.choice(concept_ids)
-
-
 
 
 # ==== LECTURE UPLOAD, PROCESSING, AND STATUS ====
 
 @app.post("/api/upload-lecture/")
 async def upload_lecture(
-    background_tasks: BackgroundTasks,
+    background_tasks: BackgroundTasks, # Import BackgroundTasks from fastapi
+    file: UploadFile = File(...),
     course_id: str = Form(...),
     week: int = Form(...),
-    file: UploadFile = File(...),
     db: Session = Depends(get_db)
 ):
-    os.makedirs("uploads", exist_ok=True)
-    filename = f"{uuid.uuid4()}_{file.filename.replace(' ', '_')}"
-    filepath = os.path.join("uploads", filename)
-    with open(filepath, "wb") as buffer:
+    # 1. Save File
+    file_id = str(uuid.uuid4())
+    safe_filename = f"{file_id}_{file.filename}"
+    file_path = os.path.join(UPLOAD_DIR, safe_filename)
+    
+    with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
-    upload_id = str(uuid.uuid4())
-    processing_id = str(uuid.uuid4())
-    # LectureUpload record for tracking upload
-    new_upload = LectureUpload(
-        id=upload_id, course_id=course_id, week=week, file_name=file.filename,
-        file_url=filepath, status="uploaded"
+
+    # 2. Create DB Record
+    processing_record = LectureProcessing(
+        id=file_id,
+        course_id=course_id,
+        week=week,
+        file_name=file.filename,
+        status="pending",
+        progress=0
     )
-    db.add(new_upload)
-    job = LectureProcessing(
-        id=processing_id, course_id=course_id, week=week, file_name=file.filename, status="pending", progress=0
-    )
-    db.add(job)
+    db.add(processing_record)
     db.commit()
-    db.refresh(new_upload)
-    db.refresh(job)
-    background_tasks.add_task(process_lecture_and_kg, filepath, upload_id, course_id, week, file.filename, processing_id)
-    return {"upload_id": upload_id, "processing_id": processing_id, "status": "processing started"}
+
+    # 3. Trigger Background Processing (Calls your GOOD function)
+    background_tasks.add_task(
+        process_lecture_and_kg, # The big function above
+        file_path,
+        file_id, 
+        course_id, 
+        week, 
+        file.filename, 
+        file_id  # using file_id as processing_id for simplicity
+    )
+
+    return {"message": "Upload started", "processing_id": file_id}
+
 
 @app.get("/api/lecture-status/")
 async def lecture_status(processing_id: str, db: Session = Depends(get_db)):
@@ -784,30 +971,69 @@ async def get_segment_detail(segment_id: str, db: Session = Depends(get_db)):
         "keywords": s.keywords
     }
 
+@app.get("/api/knowledge-graph/list")
+def list_knowledge_graphs(
+    course_id: str, 
+    week: int, 
+    db: Session = Depends(get_db)
+):
+    """
+    Returns a list of all available knowledge graphs for this week.
+    Example: [{ type: 'master', file: null }, { type: 'file', file: 'Week1.pdf' }]
+    """
+    graphs = db.query(KnowledgeGraph.graph_type, KnowledgeGraph.source_file).filter(
+        KnowledgeGraph.course_id == course_id,
+        KnowledgeGraph.week == week
+    ).all()
+    
+    results = []
+    # Always ensure 'master' is an option implicitly, but good to check if it exists
+    has_master = False
+    
+    for g in graphs:
+        if g.graph_type == 'master':
+            has_master = True
+        elif g.graph_type == 'file':
+            results.append({
+                "id": g.source_file, # Use filename as ID for simplicity
+                "name": g.source_file,
+                "type": "file"
+            })
+            
+    # Always prepend Master
+    # (or only if has_master is True, but usually you always want the option)
+    results.insert(0, { "id": "master", "name": "Combined Master Graph", "type": "master" })
+    
+    return results
+
 
 @app.get("/api/knowledge-graph")
-async def getkg(courseid: str, week: int, db: Session = Depends(get_db)):
-    print(f"🔍 KG LOOKUP: courseid='{courseid}' week={week}")
+def get_knowledge_graph(
+    courseid: str, 
+    week: int, 
+    graph_type: str = "master", # Default to master
+    source_file: str = None,
+    db: Session = Depends(get_db)
+):
+    query = db.query(KnowledgeGraph).filter(
+        KnowledgeGraph.course_id == courseid,
+        KnowledgeGraph.week == week
+    )
     
-    row = db.execute(
-        sqltext("SELECT node_data, edge_data FROM knowledge_graph WHERE course_id=:course_id AND week=:week"),
-        {"course_id": courseid, "week": week}
-    ).fetchone()
+    if source_file:
+        query = query.filter(KnowledgeGraph.source_file == source_file, KnowledgeGraph.graph_type == "file")
+    else:
+        query = query.filter(KnowledgeGraph.graph_type == graph_type)
+        
+    kg = query.first()
     
-    print(f"Row found: {row is not None}")
-    
-    if row and row[0] and row[1]:
-        try:
-            nodes = json.loads(row[0])
-            edges = json.loads(row[1])
-            print(f"✅ RETURNED {len(nodes)} nodes, {len(edges)} edges")
-            return {"nodes": nodes, "edges": edges}
-        except Exception as e:
-            print(f"JSON DECODE ERROR: {e}")
-            return {"nodes": [], "edges": []}
-    
-    print("No data found")
-    return {"nodes": [], "edges": []}
+    if not kg:
+        return {"nodes": [], "edges": []}
+        
+    return {
+        "nodes": json.loads(kg.node_data),
+        "edges": json.loads(kg.edge_data)
+    }
 
 
 # ==== RETRIEVAL PRACTICE: MCQ GENERATION (basic stub) ====
@@ -1182,62 +1408,6 @@ async def create_quiz(request: QuizCreate, db: Session = Depends(get_db)):
     return {"quiz_id": qid, "message": "Quiz created, ready for MCQ generation"}
 
 
-
-@app.post("/api/quizzes")
-async def create_quiz(payload: dict, db: Session = Depends(get_db)):
-    print("QUIZ CREATE DEBUG", payload)  
-    quiz_id = str(uuid.uuid4())
-    new_quiz = Quiz(
-        id=quiz_id,
-        name=payload.get("name", "New Quiz"),
-        course_id=payload["course_id"],  
-        week=payload["week"],
-        concept_ids=payload["concept_ids"],  # List[str]
-        instructor_id=payload.get("instructor_id", "unknown")
-    )
-    db.add(new_quiz)
-    db.commit()
-    db.refresh(new_quiz)
-    
-    mcq_count = 0
-    # Load KG
-    kg_row = db.execute(
-        sqltext("SELECT node_data FROM knowledge_graph WHERE course_id=:c AND week=:w"),
-        {"c": payload["course_id"], "w": payload["week"]}
-    ).fetchone()
-    if kg_row:
-        kg_nodes = json.loads(kg_row[0]) if kg_row[0] else []
-        # Limit to first 3 concepts
-        for cid in payload["concept_ids"][:3]:
-            node = next((n for n in kg_nodes if n.get("id") == cid), None)
-            if node:
-                kg_payload = {
-                    "course_id": payload["course_id"],
-                    "week": payload["week"],
-                    "concept_id": cid,
-                    "summary": node.get("summary", "")[:800],
-                    "contents": node.get("contents", "")[:1500]
-                }
-                try:
-                    resp = await generate_mcqs_kg(kg_payload, db)
-                    mcqs = resp.get("mcqs", [])[:2]  # 2 per concept
-                    for mcq in mcqs:
-                        db.add(MCQ(
-                            id=str(uuid.uuid4()),
-                            quiz_id=quiz_id,
-                            concept_id=cid,
-                            question=mcq.get("question", "Sample Q"),
-                            options=mcq.get("options", ["A", "B", "C", "D"]),
-                            answer=mcq.get("answer", "A")
-                        ))
-                    mcq_count += len(mcqs)
-                except Exception as e:
-                    print(f"MCQ gen failed for {cid}", e)
-    db.commit()
-    print(f"Quiz {quiz_id} created with {mcq_count} MCQs")
-    return {"quiz_id": quiz_id, "generated_mcqs": mcq_count}
-
-
 # --- 2. List all quizzes for a course/week (for student or dashboard) ---
 @app.get("/api/quiz/list")
 async def list_quizzes(course_id: str, week: int, db: Session = Depends(get_db)):
@@ -1278,76 +1448,93 @@ async def get_next_mcq_gemini(attempt_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Attempt not found")
 
     quiz = db.query(Quiz).filter_by(id=attempt.quiz_id).first()
-    if not quiz:
-        raise HTTPException(status_code=404, detail="Quiz not found")
+    settings = db.query(QuizSettings).filter_by(quiz_id=quiz.id).first()
 
-    settings = db.query(QuizSettings).filter(
-        QuizSettings.quiz_id == quiz.id
-    ).first()
-
-    max_questions = settings.max_questions if settings else None
-    include_spaced = settings.include_spaced if settings else False
-
+    # 1. Check Limits
+    max_questions = settings.max_questions if settings else 10
     responses = attempt.responses or {}
-    answered_count = len(responses)
+    if len(responses) >= max_questions:
+        return {"done": True, "reason": "max_questions_reached"}
 
-    if max_questions is not None and answered_count >= max_questions:
-        return {"done": True, "reason": "max_questions_reached", "answered": answered_count}
+    # 2. Load Graph Nodes for Intelligent Selection
+    kg = db.execute(
+        sql_text("SELECT node_data FROM knowledge_graph WHERE course_id=:c AND week=:w"),
+        {"c": quiz.course_id, "w": quiz.week}
+    ).fetchone()
+    
+    kg_nodes_map = {}
+    if kg and kg[0]:
+        nodes = json.loads(kg[0])
+        kg_nodes_map = {n['id']: n for n in nodes}
 
+    # 3. Pick Concept
     concept_ids = quiz.concept_ids or []
-    if isinstance(concept_ids, str):
-        try:
-            concept_ids = json.loads(concept_ids)
-        except Exception:
-            concept_ids = [s.strip() for s in concept_ids.split(",") if s.strip()]
-
-    concept_id = pick_next_concept(concept_ids, responses, include_spaced)
-
-    given_mcqs = set(responses.keys())
-
-    # 1) Try cached MCQs for this quiz + concept
-    cached = (
-        db.query(MCQ)
-        .filter(
-            MCQ.quiz_id == quiz.id,
-            MCQ.concept_id == concept_id,
-        )
-        .all()
+    next_concept_id = pick_next_concept(
+        concept_ids, 
+        responses, 
+        kg_nodes_map, # <-- Now passing the map!
+        include_spaced=(settings.include_spaced if settings else False)
     )
-    for m in cached:
-            if m.id not in given_mcqs:
-                return {
-                    "mcq_id": m.id,
-                    "question": m.question,
-                    "options": m.options,
-                    "answer": m.answer,
-                    "concept_id": m.concept_id,
-                }
 
-    # 2) If no cached MCQ left, generate from KG on the fly
-    payload = {
-        "course_id": quiz.course_id,
-        "week": quiz.week,
-        "concept_id": concept_id,
-    }
-    resp = await generate_mcqs_kg(payload, db)
-    mcqs = resp.get("mcqs", [])
+    # 4. Try Cached MCQs First
+    existing_mcqs = db.query(MCQ).filter(
+        MCQ.quiz_id == quiz.id, 
+        MCQ.concept_id == next_concept_id
+    ).all()
+    
+    # Filter out already answered
+    answered_ids = set(responses.keys())
+    valid_mcqs = [m for m in existing_mcqs if m.id not in answered_ids]
 
-    for mcq in mcqs:
-        mcq_id = f"gemini-{concept_id}-{hash(mcq['question'])}"
-        if mcq_id in given_mcqs:
-            continue
-        # Optionally, you can also cache this one:
-        # db.add(MCQ(...)); db.commit()
+    if valid_mcqs:
+        # Pick one (random or by difficulty if you implemented that)
+        selected = random.choice(valid_mcqs)
         return {
-            "mcq_id": mcq_id,
-            "question": mcq["question"],
-            "options": mcq["options"],
-            "answer": mcq["answer"],
-            "concept_id": concept_id,
+            "mcq_id": selected.id,
+            "question": selected.question,
+            "options": selected.options,
+            "concept_id": selected.concept_id
         }
 
-    return {"done": True}
+    # 5. Generate New if None Exist
+    print(f"⚡ Generating fresh MCQ for {next_concept_id}...")
+    kg_payload = {
+        "course_id": quiz.course_id, 
+        "week": quiz.week, 
+        "concept_id": next_concept_id,
+        "quiz_id": quiz.id
+    }
+    
+    try:
+        gen_resp = await generate_mcqs_kg(kg_payload, db)
+        new_mcqs_data = gen_resp.get("mcqs", [])
+        
+        if new_mcqs_data:
+            # SAVE IT IMMEDIATELY so it has a real ID
+            first_q = new_mcqs_data[0]
+            new_mcq = MCQ(
+                id=str(uuid.uuid4()),
+                quiz_id=quiz.id,
+                concept_id=next_concept_id,
+                question=first_q["question"],
+                options=first_q["options"],
+                answer=first_q["answer"],
+                difficulty=first_q.get("difficulty", "Medium")
+            )
+            db.add(new_mcq)
+            db.commit()
+            
+            return {
+                "mcq_id": new_mcq.id,
+                "question": new_mcq.question,
+                "options": new_mcq.options,
+                "concept_id": new_mcq.concept_id
+            }
+            
+    except Exception as e:
+        print(f"Gen Failed: {e}")
+    
+    return {"done": True, "reason": "generation_failed"}
 
 
 # --- 5. Submit MCQ answer for attempt (DB or Gemini MCQ) ---
@@ -1534,100 +1721,34 @@ async def get_quiz_settings(quiz_id: str, db: Session = Depends(get_db)):
 
 @app.post("/api/quiz/settings/{quiz_id}", response_model=QuizSettingsOut)
 async def upsert_quiz_settings(quiz_id: str, payload: QuizSettingsIn, db: Session = Depends(get_db)):
-    # 1. Fetch existing
-    qs = None
-    try:
-        qs = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
-    except AttributeError:
-        qs = db.query(QuizSettings).filter(QuizSettings.quizid == quiz_id).first()
+    qs = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
     
-    # Helper to get value from Pydantic payload safely
-    def get_payload_val(p, name):
-        # Pydantic models might have 'min_difficulty' or 'mindifficulty'
-        val = getattr(p, name, None)
-        if val is None:
-             val = getattr(p, name.replace("min", "min_").replace("max", "max_"), None)
-        return val
-
-    # Extract values from payload
-    p_week = payload.week
-    p_min = get_payload_val(payload, 'mindifficulty')
-    p_max = get_payload_val(payload, 'maxdifficulty')
-    p_maxq = get_payload_val(payload, 'maxquestions')
-    p_retries = get_payload_val(payload, 'allowedretries')
-    p_style = get_payload_val(payload, 'feedbackstyle')
-    p_spaced = get_payload_val(payload, 'includespaced')
-    
-    # 2. Create New
-    if qs is None:
+    if not qs:
         qs = QuizSettings(
-            week=p_week,
-            # Assigning attributes dynamically to handle SQLAlchemy model differences
+            id=str(uuid.uuid4()),
+            quiz_id=quiz_id,
+            week=payload.week,
+            min_difficulty=payload.min_difficulty,
+            max_difficulty=payload.max_difficulty,
+            max_questions=payload.max_questions,
+            allowed_retries=payload.allowed_retries,
+            feedback_style=payload.feedback_style,
+            include_spaced=payload.include_spaced
         )
-        # Manually set attributes to handle naming variations
-        if hasattr(QuizSettings, 'quiz_id'): qs.quiz_id = quiz_id
-        else: qs.quizid = quiz_id
-        
-        if hasattr(qs, 'mindifficulty'): qs.mindifficulty = p_min or "Easy"
-        else: qs.min_difficulty = p_min or "Easy"
-        
-        if hasattr(qs, 'maxdifficulty'): qs.maxdifficulty = p_max or "Hard"
-        else: qs.max_difficulty = p_max or "Hard"
-        
-        if hasattr(qs, 'maxquestions'): qs.maxquestions = p_maxq if p_maxq is not None else 10
-        else: qs.max_questions = p_maxq if p_maxq is not None else 10
-        
-        if hasattr(qs, 'allowedretries'): qs.allowedretries = p_retries if p_retries is not None else 3
-        else: qs.allowed_retries = p_retries if p_retries is not None else 3
-        
-        if hasattr(qs, 'feedbackstyle'): qs.feedbackstyle = p_style or "Immediate"
-        else: qs.feedback_style = p_style or "Immediate"
-        
-        if hasattr(qs, 'includespaced'): qs.includespaced = p_spaced
-        else: qs.include_spaced = p_spaced
-
         db.add(qs)
-    
-    # 3. Update Existing
     else:
-        qs.week = p_week
+        qs.week = payload.week
+        qs.min_difficulty = payload.min_difficulty
+        qs.max_difficulty = payload.max_difficulty
+        qs.max_questions = payload.max_questions
+        qs.allowed_retries = payload.allowed_retries
+        qs.feedback_style = payload.feedback_style
+        qs.include_spaced = payload.include_spaced
         
-        def update_attr(obj, name, val, default):
-            target = name
-            if not hasattr(obj, name):
-                target = name.replace("min", "min_").replace("max", "max_").replace("feedback", "feedback_").replace("allowed", "allowed_").replace("include", "include_")
-            
-            current = getattr(obj, target, default)
-            setattr(obj, target, val if val is not None else current)
-
-        update_attr(qs, 'mindifficulty', p_min, "Easy")
-        update_attr(qs, 'maxdifficulty', p_max, "Hard")
-        update_attr(qs, 'maxquestions', p_maxq, 10)
-        update_attr(qs, 'allowedretries', p_retries, 3)
-        update_attr(qs, 'feedbackstyle', p_style, "Immediate")
-        update_attr(qs, 'includespaced', p_spaced, False)
-
     db.commit()
     db.refresh(qs)
-    
-    # 4. Return safely
-    def get_final_attr(obj, name):
-        return getattr(obj, name, getattr(obj, name.replace("min", "min_").replace("max", "max_").replace("feedback", "feedback_").replace("allowed", "allowed_").replace("include", "include_"), None))
+    return qs
 
-    q_id_val = getattr(qs, 'quiz_id', getattr(qs, 'quizid', quiz_id))
-
-    return {
-        "id": qs.id,
-        "quizid": q_id_val,
-        "quiz_id": q_id_val,
-        "week": qs.week,
-        "mindifficulty": get_final_attr(qs, 'mindifficulty'),
-        "maxdifficulty": get_final_attr(qs, 'maxdifficulty'),
-        "maxquestions": get_final_attr(qs, 'maxquestions'),
-        "allowedretries": get_final_attr(qs, 'allowedretries'),
-        "feedbackstyle": get_final_attr(qs, 'feedbackstyle'),
-        "includespaced": get_final_attr(qs, 'includespaced')
-    }
 
 @app.get("/api/quiz/questions/{quiz_id}")
 def get_quiz_questions(quiz_id: str, db: Session = Depends(get_db)):
