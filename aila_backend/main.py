@@ -1457,15 +1457,20 @@ async def get_next_mcq_gemini(attempt_id: str, db: Session = Depends(get_db)):
         return {"done": True, "reason": "max_questions_reached"}
 
     # 2. Load Graph Nodes for Intelligent Selection
-    kg = db.execute(
-        sql_text("SELECT node_data FROM knowledge_graph WHERE course_id=:c AND week=:w"),
-        {"c": quiz.course_id, "w": quiz.week}
-    ).fetchone()
+    kg_nodes_map = {} # Default to empty dict
     
-    kg_nodes_map = {}
-    if kg and kg[0]:
-        nodes = json.loads(kg[0])
-        kg_nodes_map = {n['id']: n for n in nodes}
+    try:
+        kg_row = db.execute(
+            sql_text("SELECT node_data FROM knowledge_graph WHERE course_id=:c AND week=:w"),
+            {"c": quiz.course_id, "w": quiz.week}
+        ).fetchone()
+
+        if kg_row and kg_row[0]:
+            nodes = json.loads(kg_row[0])
+            kg_nodes_map = {n['id']: n for n in nodes}
+    except Exception as e:
+        print(f"[WARNING] Graph load failed for Quiz {quiz.id}: {e}")
+        # Proceed with empty map - logic will fallback to random choice
 
     # 3. Pick Concept
     concept_ids = quiz.concept_ids or []
@@ -1721,11 +1726,12 @@ async def get_quiz_settings(quiz_id: str, db: Session = Depends(get_db)):
 
 @app.post("/api/quiz/settings/{quiz_id}", response_model=QuizSettingsOut)
 async def upsert_quiz_settings(quiz_id: str, payload: QuizSettingsIn, db: Session = Depends(get_db)):
+    # 1. Fetch existing settings
     qs = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
-    
+
     if not qs:
+        # Create New
         qs = QuizSettings(
-            id=str(uuid.uuid4()),
             quiz_id=quiz_id,
             week=payload.week,
             min_difficulty=payload.min_difficulty,
@@ -1737,6 +1743,7 @@ async def upsert_quiz_settings(quiz_id: str, payload: QuizSettingsIn, db: Sessio
         )
         db.add(qs)
     else:
+        # Update Existing (clean direct assignment)
         qs.week = payload.week
         qs.min_difficulty = payload.min_difficulty
         qs.max_difficulty = payload.max_difficulty
@@ -1744,10 +1751,11 @@ async def upsert_quiz_settings(quiz_id: str, payload: QuizSettingsIn, db: Sessio
         qs.allowed_retries = payload.allowed_retries
         qs.feedback_style = payload.feedback_style
         qs.include_spaced = payload.include_spaced
-        
+    
     db.commit()
     db.refresh(qs)
     return qs
+
 
 
 @app.get("/api/quiz/questions/{quiz_id}")
@@ -2005,38 +2013,24 @@ async def start_student_quiz(
     allowed_retries = settings.allowed_retries if settings else 3
     feedback_style = settings.feedback_style if settings else "default"
 
-    # --- ROBUST DIFFICULTY FILTERING LOGIC ---
-    # Use lowercase keys for normalization
+    # --- FIXED ROBUST DIFFICULTY LOGIC ---
     DIFF_LEVELS = {"easy": 1, "medium": 2, "hard": 3}
-    
-    # Normalize settings (Handle None or mismatch case)
-    min_setting = (settings.min_difficulty or "Easy").lower()
-    max_setting = (settings.max_difficulty or "Hard").lower()
-    
-    min_diff_val = DIFF_LEVELS.get(min_setting, 1)
-    max_diff_val = DIFF_LEVELS.get(max_setting, 3)
 
-    # 2. Check for ACTIVE incomplete attempt (Resume Logic)
-    active_attempt = db.query(QuizAttempt).filter(
-        QuizAttempt.quiz_id == quiz_id,
-        QuizAttempt.student_id == student_id,
-        QuizAttempt.score == None 
-    ).first()
-
-    completed_attempts = db.query(QuizAttempt).filter(
-        QuizAttempt.quiz_id == quiz_id,
-        QuizAttempt.student_id == student_id,
-        QuizAttempt.score != None
-    ).count()
+    # Safely handle None values and force lowercase
+    raw_min = settings.min_difficulty if settings and settings.min_difficulty else "Easy"
+    raw_max = settings.max_difficulty if settings and settings.max_difficulty else "Hard"
     
-    # Helper to filter questions
+    min_diff_val = DIFF_LEVELS.get(raw_min.lower(), 1)
+    max_diff_val = DIFF_LEVELS.get(raw_max.lower(), 3)
+
+    # Helper to filter questions (Now Case-Insensitive)
     def get_filtered_mcqs():
         all_mcqs = db.query(MCQ).filter(MCQ.quiz_id == quiz_id).all()
         valid = []
         for m in all_mcqs:
-            # Normalize DB Value
-            q_diff = (m.difficulty or "Medium").lower()
-            q_val = DIFF_LEVELS.get(q_diff, 2) # Default to Medium if unknown
+            # Handle empty difficulty in DB
+            q_diff_str = m.difficulty if m.difficulty else "Medium"
+            q_val = DIFF_LEVELS.get(q_diff_str.lower(), 2) # Default to Medium (2)
             
             if min_diff_val <= q_val <= max_diff_val:
                 valid.append(m)
