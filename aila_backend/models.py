@@ -10,7 +10,9 @@ from sqlalchemy import (
     ForeignKey,
     JSON,
 )
-from sqlalchemy.orm import relationship
+from sqlalchemy import Column, String, Integer, Boolean, DateTime, Text, JSON, func, Index, PrimaryKeyConstraint
+from sqlalchemy.orm import relationship, declarative_base, sessionmaker
+from sqlalchemy.dialects.sqlite import DATETIME
 from sqlalchemy.sql import func
 import uuid
 from aila_backend.database import Base
@@ -125,21 +127,18 @@ class Quiz(Base):
 
 
 class MCQ(Base):
-    __tablename__ = "mcqs"
+    __tablename__ = "mcq"  
 
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    quiz_id = Column(String, ForeignKey("quizzes.id"), nullable=True)
-    concept_id = Column(String, nullable=True)
-    segment_id = Column(String, ForeignKey("segments.id"), nullable=True)
-
+    id = Column(String(36), primary_key=True, index=True)
+    quiz_id = Column(String(36), ForeignKey("quizzes.id"))
+    concept_id = Column(String(36))
     question = Column(Text, nullable=False)
     options = Column(JSON, nullable=False)
-    answer = Column(Text, nullable=True)
-    difficulty = Column(String, default="Medium")
-    bloom_level = Column(String, default="Remember")
+    answer = Column(String(255), nullable=False)
+    difficulty = Column(String(20), default="Medium")
+    bloom_level = Column(String(20), default="Remember")  
 
     quiz = relationship("Quiz", back_populates="mcqs")
-    segment = relationship("Segment")
 
 
 class QuizSettings(Base):
@@ -159,8 +158,6 @@ class QuizSettings(Base):
     include_spaced = Column(Boolean, default=False)
 
 
-
-
 class QuizAttempt(Base):
     __tablename__ = "quiz_attempts"
 
@@ -170,8 +167,10 @@ class QuizAttempt(Base):
     started_at = Column(DateTime(timezone=True), server_default=func.now())
     last_activity = Column(DateTime(timezone=True), onupdate=func.now())
     responses = Column(JSON, default=dict)  # {mcq_id: {...}}
-    score = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=func.now())
+    score = Column(Integer, default=0)           
+    total_questions = Column(Integer, default=0) 
+    completed = Column(Boolean, default=False)
 
 
 class MCQResponse(Base):
@@ -179,8 +178,14 @@ class MCQResponse(Base):
 
     id = Column(String(36), primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
     attempt_id = Column(String(36), ForeignKey("quiz_attempts.id"))
-    mcq_id = Column(String(36), ForeignKey("mcqs.id"))
+    mcq_id = Column(String(36), ForeignKey("mcq.id"))  
     question = Column(Text, nullable=False)
-    selected = Column(String(255), nullable=True)
-    correct = Column(Boolean, default=False)
     answered_at = Column(DateTime(timezone=True), server_default=func.now())
+    selected_answer = Column(String, nullable=False)  # ✅ this exists
+    is_correct = Column(Boolean, default=False)       # ✅ this exists
+
+    __table_args__ = (
+        PrimaryKeyConstraint("attempt_id", "mcq_id"),
+        Index("ix_mcq_response_attempt", "attempt_id"),
+        Index("ix_mcq_response_mcq", "mcq_id"),
+    )

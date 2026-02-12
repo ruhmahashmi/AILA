@@ -774,37 +774,41 @@ export default function CourseWeekPage({ params }) {
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start pt-4 border-t border-gray-200 min-h-[600px]">
              
              {/* LEFT COLUMN: Quiz List */}
-             <div className="lg:col-span-4 h-[600px] overflow-y-auto pr-2 custom-scrollbar flex flex-col bg-gray-50 rounded-xl border border-gray-200">
-               <div className="flex items-center justify-between p-4 sticky top-0 bg-gray-50 z-10 border-b border-gray-200">
-                 <h2 className="text-xl font-bold text-gray-800">Your Quizzes <span className="text-gray-500 text-base font-normal">({quizzes.length})</span></h2>
-                 <button onClick={fetchQuizzes} className="text-sm text-blue-600 hover:underline">Refresh</button>
-               </div>
+              <div className="lg:col-span-4 h-[600px] overflow-y-auto pr-2 custom-scrollbar flex flex-col bg-gray-50 rounded-xl border border-gray-200">
+                <div className="flex items-center justify-between p-4 sticky top-0 bg-gray-50 z-10 border-b border-gray-200">
+                  <h2 className="text-xl font-bold text-gray-800">Your Quizzes <span className="text-gray-500 text-base font-normal">({quizzes.length})</span></h2>
+                  <button onClick={fetchQuizzes} className="text-sm text-blue-600 hover:underline">Refresh</button>
+                </div>
 
-               <div className="p-4 space-y-4 flex-1">
-                 <InstructorDashboard quizId={selectedQuizId} /> 
-               </div>
-               
-               <div className="p-4 space-y-4 flex-1">
-                 {quizzes.length === 0 && <p className="text-gray-400 italic text-sm text-center py-10">No quizzes created yet.</p>}
+                {/* ✅ DASHBOARD - Shows when a quiz is selected */}
+                {selectedQuizId && (
+                  <div className="p-4 border-b border-gray-200 bg-white">
+                    <InstructorDashboard quizId={selectedQuizId} /> 
+                  </div>
+                )}
+                
+                {/* ✅ QUIZ LIST */}
+                <div className="p-4 space-y-4 flex-1">
+                  {quizzes.length === 0 && <p className="text-gray-400 italic text-sm text-center py-10">No quizzes created yet.</p>}
 
-                 {quizzes.map((q, idx) => {
-                   const isSelected = selectedQuizId === q.id;
-                   return (
-                     <div key={q.id} className={`rounded-xl border-2 transition-all overflow-hidden bg-white ${isSelected ? "border-blue-500 shadow-md ring-2 ring-blue-50" : "border-gray-200 hover:border-blue-300"} group relative`}>
+                  {quizzes.map((q, idx) => {
+                    const isSelected = selectedQuizId === q.id;
+                    return (
+                      <div key={q.id} className={`rounded-xl border-2 transition-all overflow-hidden bg-white ${isSelected ? "border-blue-500 shadow-md ring-2 ring-blue-50" : "border-gray-200 hover:border-blue-300"} group relative`}>
                         <div 
                           onClick={() => {
-                             setSelectedQuizId(q.id);
-                             setExpandedQuizSettingsId(q.id); 
+                            setSelectedQuizId(q.id);
+                            setExpandedQuizSettingsId(q.id); 
                           }}
                           className="p-4 cursor-pointer"
                         >
-                           <div className="flex justify-between items-start mb-1 pr-6">
-                              <h3 className="font-bold text-lg text-gray-900 truncate">{q.name}</h3>
-                              <span className="text-xs font-mono text-gray-400">#{idx + 1}</span>
-                           </div>
-                           <p className="text-xs text-gray-500 mt-1 line-clamp-2">
-                             Concepts: {(q.concept_ids || q.conceptids || []).length}
-                           </p>
+                          <div className="flex justify-between items-start mb-1 pr-6">
+                            <h3 className="font-bold text-lg text-gray-900 truncate">{q.name}</h3>
+                            <span className="text-xs font-mono text-gray-400">#{idx + 1}</span>
+                          </div>
+                          <p className="text-xs text-gray-500 mt-1 line-clamp-2">
+                            Concepts: {(q.concept_ids || q.conceptids || []).length}
+                          </p>
                         </div>
                         
                         {/* DELETE BUTTON */}
@@ -818,24 +822,24 @@ export default function CourseWeekPage({ params }) {
                           `}
                           title="Delete Quiz"
                         >
-                           {deletingQuizId === q.id ? (
-                             <span className="text-xs">⏳</span>
-                           ) : (
-                             <span>🗑️</span>
-                           )}
+                          {deletingQuizId === q.id ? (
+                            <span className="text-xs">⏳</span>
+                          ) : (
+                            <span>🗑️</span>
+                          )}
                         </button>
 
                         {isSelected && expandedQuizSettingsId === q.id && (
-                           <div className="border-t border-gray-100 bg-gray-50 p-4 animate-in slide-in-from-top-2 duration-200">
-                              <h4 className="text-xs font-bold text-gray-400 uppercase mb-2">Settings</h4>
-                              <QuizSettingsForm quizId={q.id} week={week} />
-                           </div>
+                          <div className="border-t border-gray-100 bg-gray-50 p-4 animate-in slide-in-from-top-2 duration-200">
+                            <h4 className="text-xs font-bold text-gray-400 uppercase mb-2">Settings</h4>
+                            <QuizSettingsForm quizId={q.id} week={week} />
+                          </div>
                         )}
-                     </div>
-                   );
-                 })}
-               </div>
-             </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
 
              {/* RIGHT COLUMN: Question Bank Review */}
              <div className="lg:col-span-8 h-[600px]">

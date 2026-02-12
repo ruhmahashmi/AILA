@@ -141,14 +141,28 @@ export default function StudentCourseWeekPage({ params }) {
     setSubmitting(true);
     
     try {
+      const responsesArray = Object.entries(answers).map(([mcq_id, selected_answer]) => ({
+        mcq_id,
+        selected_answer,
+      }));
+  
       const res = await fetch(`${BACKEND_URL}/api/student/quiz/submit`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           attempt_id: quizData.attempt_id,
-          responses: answers
-        })
+          student_id: STUDENT_ID,     // ✅ include student + quiz for stats
+          quiz_id: activeQuizId,
+          responses: responsesArray,
+        }),
       });
+  
+      if (!res.ok) {
+        const err = await res.json().catch(() => null);
+        alert(err?.detail || "Error submitting quiz");
+        return;
+      }
+  
       const data = await res.json();
       setResult(data);
     } catch (e) {
@@ -156,7 +170,7 @@ export default function StudentCourseWeekPage({ params }) {
     } finally {
       setSubmitting(false);
     }
-  }
+  }  
 
   // 5. Navigation Handlers
   function handleNext() {

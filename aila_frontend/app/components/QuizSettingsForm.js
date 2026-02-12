@@ -61,32 +61,41 @@ export default function QuizSettingsForm({ quizId, week }) {
   async function handleSave() {
     setSaving(true);
     setMessage(null);
-
+  
     try {
       const payload = {
         week: parseInt(week, 10),
-        mindifficulty: settings.mindifficulty,
-        maxdifficulty: settings.maxdifficulty,
-        min_bloom_level: settings.min_bloom_level,  // ✅ Add
-        max_bloom_level: settings.max_bloom_level,  // ✅ Add
-        maxquestions: parseInt(settings.maxquestions, 10),
-        allowedretries: parseInt(settings.allowedretries, 10),
-        feedbackstyle: settings.feedbackstyle,
-        includespaced: settings.includespaced
+        min_difficulty: settings.mindifficulty,
+        max_difficulty: settings.maxdifficulty,
+        min_bloom_level: settings.min_bloom_level,
+        max_bloom_level: settings.max_bloom_level,
+        max_questions: parseInt(settings.maxquestions, 10),
+        allowed_retries: parseInt(settings.allowedretries, 10),
+        feedback_style: settings.feedbackstyle,
+        include_spaced: settings.includespaced,
       };
-
+  
       const res = await fetch(`${BACKEND_URL}/api/quiz/settings/${quizId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       });
-
+  
       if (!res.ok) throw new Error("Failed to save");
-      
+  
       const savedData = await res.json();
       setMessage({ type: "success", text: "Settings saved!" });
-      setSettings(prev => ({ ...prev, ...savedData }));
-
+      setSettings(prev => ({
+        ...prev,
+        mindifficulty: savedData.mindifficulty,
+        maxdifficulty: savedData.maxdifficulty,
+        min_bloom_level: savedData.min_bloom_level,
+        max_bloom_level: savedData.max_bloom_level,
+        maxquestions: savedData.maxquestions,
+        allowedretries: savedData.allowedretries,
+        feedbackstyle: savedData.feedbackstyle,
+        includespaced: savedData.includespaced,
+      }));
     } catch (e) {
       setMessage({ type: "error", text: "Error saving settings." });
     } finally {
@@ -94,7 +103,7 @@ export default function QuizSettingsForm({ quizId, week }) {
       setTimeout(() => setMessage(null), 3000);
     }
   }
-
+    
   return (
     <div className="bg-white p-4 rounded-lg border border-gray-200 shadow-sm">
       <h3 className="text-sm font-bold text-gray-800 uppercase tracking-wide mb-4 border-b pb-2">

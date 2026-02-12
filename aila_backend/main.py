@@ -7,7 +7,7 @@ from fastapi import WebSocket, WebSocketDisconnect, Path
 from fastapi.middleware.cors import CORSMiddleware
 
 from sqlalchemy.orm import Session
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, JSON
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, JSON, Boolean, func, Index, PrimaryKeyConstraint
 from sqlalchemy.sql import func
 from sqlalchemy import Boolean
 from sqlalchemy import text as sql_text
@@ -113,13 +113,12 @@ class QuizSettingsIn(BaseModel):
     week: int
     min_difficulty: str = "Easy"
     max_difficulty: str = "Hard"
-    min_bloom_level: str = "Remember"  
+    min_bloom_level: str = "Remember" 
     max_bloom_level: str = "Create"    
     max_questions: int = 10
     allowed_retries: int = 3
     feedback_style: str = "Immediate"
     include_spaced: bool = False
-
 
 class QuizSettingsOut(BaseModel):
     id: int
@@ -995,8 +994,9 @@ async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_
     bloom_hierarchy = ["Remember", "Understand", "Apply", "Analyze", "Evaluate", "Create"]
     min_bloom = "Remember"
     max_bloom = "Create"
+    allowed_bloom_levels = bloom_hierarchy[:]  # ✅ always defined
     allowed_bloom_str = "'Remember', 'Understand', 'Apply', 'Analyze', 'Evaluate', 'Create'"
-    
+
     if quiz_id:
         try:
             settings = None
@@ -1006,20 +1006,6 @@ async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_
                 settings = db.query(QuizSettings).filter(QuizSettings.quizid == quiz_id).first()
                 
             if settings:
-                # Handle Difficulty Range
-                mind = settings.min_difficulty or "Easy"
-                maxd = settings.max_difficulty or "Hard"
-                try:
-                    start_idx = allowed_difficulties.index(mind)
-                    end_idx = allowed_difficulties.index(maxd)
-                    if start_idx > end_idx: 
-                        start_idx, end_idx = end_idx, start_idx
-                    allowed_difficulties = allowed_difficulties[start_idx : end_idx+1]
-                    allowed_str = ", ".join([f"'{x}'" for x in allowed_difficulties])
-                except ValueError:
-                    pass
-                
-                # ✅ Handle Bloom Level Range
                 min_bloom = getattr(settings, 'min_bloom_level', None) or "Remember"
                 max_bloom = getattr(settings, 'max_bloom_level', None) or "Create"
                 try:
@@ -1030,13 +1016,16 @@ async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_
                     allowed_bloom_levels = bloom_hierarchy[bloom_start_idx : bloom_end_idx+1]
                     allowed_bloom_str = ", ".join([f"'{x}'" for x in allowed_bloom_levels])
                 except (ValueError, AttributeError):
-                    allowed_bloom_levels = bloom_hierarchy
-                    
+                    allowed_bloom_levels = bloom_hierarchy[:]
+                    allowed_bloom_str = ", ".join([f"'{x}'" for x in allowed_bloom_levels])
         except Exception as e:
             print(f"Settings lookup error: {e}")
-            allowed_bloom_levels = bloom_hierarchy
+            allowed_bloom_levels = bloom_hierarchy[:]
+            allowed_bloom_str = ", ".join([f"'{x}'" for x in allowed_bloom_levels])
     else:
-        allowed_bloom_levels = bloom_hierarchy
+        allowed_bloom_levels = bloom_hierarchy[:]
+        allowed_bloom_str = ", ".join([f"'{x}'" for x in allowed_bloom_levels])
+
 
     # 3. Fetch KG Context (Robust Attribute Access)
     kg_entry = None
@@ -1073,49 +1062,49 @@ async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_
     # 4. ✅ Build Bloom Constraint Text
     if min_bloom == max_bloom:
         bloom_instruction = f"""
-BLOOM'S TAXONOMY CONSTRAINT:
-- Generate questions ONLY at the '{min_bloom}' cognitive level
-- Do NOT create questions at other Bloom levels
-"""
+        BLOOM'S TAXONOMY CONSTRAINT:
+        - Generate questions ONLY at the '{min_bloom}' cognitive level
+        - Do NOT create questions at other Bloom levels
+        """
     else:
         bloom_instruction = f"""
-BLOOM'S TAXONOMY CONSTRAINT:
-- Generate questions at these cognitive levels ONLY: {allowed_bloom_str}
-- Bloom hierarchy: Remember < Understand < Apply < Analyze < Evaluate < Create
-- Your questions must be between {min_bloom} and {max_bloom} (inclusive)
-- Mix different levels within this range
-"""
+        BLOOM'S TAXONOMY CONSTRAINT:
+        - Generate questions at these cognitive levels ONLY: {allowed_bloom_str}
+        - Bloom hierarchy: Remember < Understand < Apply < Analyze < Evaluate < Create
+        - Your questions must be between {min_bloom} and {max_bloom} (inclusive)
+        - Mix different levels within this range
+        """
 
     # 5. Prompt Generation
     prompt = f"""
-As an expert computer science instructor, create relevant multiple-choice questions (MCQs) for the concept "{concept_id}".
+    As an expert computer science instructor, create relevant multiple-choice questions (MCQs) for the concept "{concept_id}".
 
-TARGET DIFFICULTIES: {allowed_str}
+    TARGET DIFFICULTIES: {allowed_str}
 
-{bloom_instruction}
+    {bloom_instruction}
 
-STRICT RULES:
-1. Questions must be stand-alone and not reference "the text" or "according to..."
-2. Provide exactly 4 options per question.
-3. Include 'difficulty' field with one of: {allowed_str}
-4. Include 'bloom_level' field with one of: {allowed_bloom_str}
-5. Respond ONLY as a valid JSON list (no markdown, no backticks).
+    STRICT RULES:
+    1. Questions must be stand-alone and not reference "the text" or "according to..."
+    2. Provide exactly 4 options per question.
+    3. Include 'difficulty' field with one of: {allowed_str}
+    4. Include 'bloom_level' field with one of: {allowed_bloom_str}
+    5. Respond ONLY as a valid JSON list (no markdown, no backticks).
 
-Response Format:
-[
-  {{
-    "question": "What is the time complexity of binary search?",
-    "options": ["O(1)", "O(log n)", "O(n)", "O(n²)"],
-    "answer": "O(log n)",
-    "difficulty": "Medium",
-    "bloom_level": "Remember"
-  }}
-]
+    Response Format:
+    [
+    {{
+        "question": "What is the time complexity of binary search?",
+        "options": ["O(1)", "O(log n)", "O(n)", "O(n²)"],
+        "answer": "O(log n)",
+        "difficulty": "Medium",
+        "bloom_level": "Remember"
+    }}
+    ]
 
---- CONTEXT ---
-Summary: {selected_summary[:800] if selected_summary else "No summary available."}
-Details: {selected_contents[:1200] if selected_contents else "No additional details."}
-"""
+    --- CONTEXT ---
+    Summary: {selected_summary[:800] if selected_summary else "No summary available."}
+    Details: {selected_contents[:1200] if selected_contents else "No additional details."}
+    """
 
     try:
         model = genai.GenerativeModel('models/gemini-2.5-flash')
@@ -1353,13 +1342,21 @@ async def websocket_endpoint(websocket: WebSocket, course_id: str, week: int):
 
 # ✅ WebSocket endpoint for instructors 
 @app.websocket("/ws/quiz/{quiz_id}")
-async def websocket_endpoint(websocket: WebSocket, quiz_id: str):
-    await manager.connect(websocket, quiz_id)
+async def websocket_quiz_endpoint(websocket: WebSocket, quiz_id: str):
+    await websocket.accept()
+    
+    # ✅ Allow connections without auth for now
+    user_id = "instructor"  # or websocket.query_params.get("user_id")
+    
+    await manager.connect(quiz_id, user_id, websocket)
     try:
         while True:
             data = await websocket.receive_text()
+            # handle messages
     except WebSocketDisconnect:
-        manager.disconnect(websocket, quiz_id)
+        manager.disconnect(quiz_id, user_id)
+        await websocket.close()
+
 
 # --- 1. Create a quiz (Instructor) ---
 @app.post("/api/quiz/create")
@@ -1503,7 +1500,7 @@ async def get_next_mcq_gemini(attempt_id: str, db: Session = Depends(get_db)):
                 options=first_q["options"],
                 answer=first_q["answer"],
                 difficulty=first_q.get("difficulty", "Medium"),
-                bloom_level=first_q.get("bloom_level", "Remember"),
+                bloom_level=item["bloom_level"]
             )
             db.add(new_mcq)
             db.commit()
@@ -1519,6 +1516,24 @@ async def get_next_mcq_gemini(attempt_id: str, db: Session = Depends(get_db)):
         print(f"Gen Failed: {e}")
     
     return {"done": True, "reason": "generation_failed"}
+
+@app.post("/api/quiz/{quiz_id}/mcqs")  # or whatever
+async def add_generated_mcqs(quiz_id: str, payload: dict, db):
+    mcqs_data = payload["mcqs"]
+    for item in mcqs_data:
+        mcq = MCQ(
+            id=str(uuid.uuid4()),
+            quiz_id=quiz_id,
+            question=item["question"],
+            options=json.dumps(item["options"]),
+            answer=item["answer"],
+            concept_id=item["concept_id"],
+            difficulty=item["difficulty"],
+            bloom_level=item["bloom_level"],  # ✅ ADD THIS LINE
+        )
+        db.add(mcq)
+    db.commit()
+    return {"added": len(mcqs_data)}
 
 
 # --- 5. Submit MCQ answer for attempt (DB or Gemini MCQ) ---
@@ -1709,7 +1724,7 @@ async def upsert_quiz_settings(quiz_id: str, payload: QuizSettingsIn, db: Sessio
             max_questions=payload.max_questions,
             allowed_retries=payload.allowed_retries,
             feedback_style=payload.feedback_style,
-            include_spaced=payload.include_spaced
+            include_spaced=payload.include_spaced,
         )
         db.add(qs)
     else:
@@ -1993,54 +2008,91 @@ async def start_student_quiz(
     quiz = db.query(Quiz).filter(Quiz.id == quiz_id).first()
     if not quiz:
         raise HTTPException(status_code=404, detail="Quiz not found")
-        
-    settings = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
-    
-    # Defaults
-    max_q = settings.max_questions if settings else 10
-    allowed_retries = settings.allowed_retries if settings else 3
-    feedback_style = settings.feedback_style if settings else "default"
 
-    # --- FIXED ROBUST DIFFICULTY LOGIC ---
+    settings = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
+
+    # Defaults
+    max_q = settings.max_questions if settings and settings.max_questions else 10
+    allowed_retries = settings.allowed_retries if settings and settings.allowed_retries else 3
+    feedback_style = settings.feedback_style if settings and settings.feedback_style else "Immediate"
+
+    # --- Difficulty handling ---
     DIFF_LEVELS = {"easy": 1, "medium": 2, "hard": 3}
 
-    # Safely handle None values and force lowercase
     raw_min = settings.min_difficulty if settings and settings.min_difficulty else "Easy"
     raw_max = settings.max_difficulty if settings and settings.max_difficulty else "Hard"
-    
+
     min_diff_val = DIFF_LEVELS.get(raw_min.lower(), 1)
     max_diff_val = DIFF_LEVELS.get(raw_max.lower(), 3)
 
-    # Helper to filter questions (Now Case-Insensitive)
+    # --- Bloom Levels ---
+    BLOOM_LEVELS = ["Remember", "Understand", "Apply", "Analyze", "Evaluate", "Create"]
+
+    raw_min_bloom = settings.min_bloom_level if settings and settings.min_bloom_level else "Remember"
+    raw_max_bloom = settings.max_bloom_level if settings and settings.max_bloom_level else "Create"
+
+    try:
+        bloom_start = BLOOM_LEVELS.index(raw_min_bloom)
+        bloom_end = BLOOM_LEVELS.index(raw_max_bloom)
+        if bloom_start > bloom_end:
+            bloom_start, bloom_end = bloom_end, bloom_start
+        allowed_blooms = set(BLOOM_LEVELS[bloom_start:bloom_end + 1])
+    except ValueError:
+        allowed_blooms = set(BLOOM_LEVELS)
+
     def get_filtered_mcqs():
         all_mcqs = db.query(MCQ).filter(MCQ.quiz_id == quiz_id).all()
         valid = []
         for m in all_mcqs:
-            # Handle empty difficulty in DB
+            # Difficulty
             q_diff_str = m.difficulty if m.difficulty else "Medium"
-            q_val = DIFF_LEVELS.get(q_diff_str.lower(), 2) # Default to Medium (2)
-            
-            if min_diff_val <= q_val <= max_diff_val:
-                valid.append(m)
+            q_val = DIFF_LEVELS.get(q_diff_str.lower(), 2)
+            if not (min_diff_val <= q_val <= max_diff_val):
+                continue
+
+            # Bloom (MCQ.bloom_level field)
+            q_bloom = (getattr(m, "bloom_level", None) or "Remember")
+            if q_bloom not in allowed_blooms:
+                continue
+
+            valid.append(m)
         return valid, all_mcqs
 
-    # 3. Resume Existing Attempt
+
+    # 2. Find existing attempts for this student+quiz
+    attempts_q = db.query(QuizAttempt).filter(
+        QuizAttempt.quiz_id == quiz_id,
+        QuizAttempt.student_id == student_id
+    )
+
+    active_attempt = attempts_q.filter(QuizAttempt.completed == False).first()
+    completed_attempts = attempts_q.filter(QuizAttempt.completed == True).count()
+
+    # 3. Resume existing attempt if present
     if active_attempt:
-        # Re-select questions using the same logic
         valid_mcqs, all_mcqs = get_filtered_mcqs()
-        
-        # If filtering leaves nothing, use all_mcqs as fallback (better than empty)
         target_pool = valid_mcqs if valid_mcqs else all_mcqs
-        
+
+        if not target_pool:
+            return {
+                "attempt_id": active_attempt.id,
+                "questions": [],
+                "settings": {
+                    "feedback_style": feedback_style,
+                    "max_questions": max_q
+                },
+                "retries_left": max(0, allowed_retries - completed_attempts)
+            }
+
         selected_mcqs = random.sample(target_pool, min(len(target_pool), max_q))
-        
+
         return {
             "attempt_id": active_attempt.id,
             "questions": [
                 {
                     "id": m.id,
                     "question": m.question,
-                    "options": m.options, 
+                    "options": m.options,
                     "difficulty": m.difficulty
                 } for m in selected_mcqs
             ],
@@ -2051,48 +2103,43 @@ async def start_student_quiz(
             "retries_left": max(0, allowed_retries - completed_attempts)
         }
 
-    # 4. Check Retries (Only count COMPLETED attempts)
+    # 4. Enforce retry limit (only completed attempts count)
     if completed_attempts >= allowed_retries:
-         raise HTTPException(status_code=403, detail="No retries remaining")
+        raise HTTPException(status_code=403, detail="No retries remaining")
 
-    # 5. Create NEW Attempt with Filtering
+    # 5. Create new attempt with filtering
     valid_mcqs, all_mcqs = get_filtered_mcqs()
-    
-    # STRICT FILTERING: 
-    # If we have valid questions, use ONLY them.
-    # If we have ZERO valid questions (e.g. settings=Easy, DB=Hard only), 
-    # we have two choices: Return empty (error) OR fallback.
-    # Safe choice: Fallback to all_mcqs but maybe warn? For now, fallback.
-    target_pool = valid_mcqs if valid_mcqs else all_mcqs 
-    
+    target_pool = valid_mcqs if valid_mcqs else all_mcqs
+
     if not target_pool:
-        # Quiz is literally empty
         return {
             "attempt_id": "error",
             "questions": [],
             "settings": {},
-            "retries_left": 0
+            "retries_left": max(0, allowed_retries - completed_attempts)
         }
 
     selected_mcqs = random.sample(target_pool, min(len(target_pool), max_q))
-    
+
     attempt_id = str(uuid.uuid4())
     new_attempt = QuizAttempt(
         id=attempt_id,
         quiz_id=quiz_id,
         student_id=student_id,
-        responses={} 
+        score=0,
+        total_questions=0,
+        completed=False
     )
     db.add(new_attempt)
     db.commit()
-    
+
     return {
         "attempt_id": attempt_id,
         "questions": [
             {
                 "id": m.id,
                 "question": m.question,
-                "options": m.options, 
+                "options": m.options,
                 "difficulty": m.difficulty
             } for m in selected_mcqs
         ],
@@ -2102,6 +2149,7 @@ async def start_student_quiz(
         },
         "retries_left": max(0, allowed_retries - completed_attempts)
     }
+
 
 @app.put("/api/mcq/{mcq_id}")
 async def update_mcq(mcq_id: str, payload: MCQUpdate, db: Session = Depends(get_db)):
@@ -2137,10 +2185,20 @@ async def update_mcq(mcq_id: str, payload: MCQUpdate, db: Session = Depends(get_
 
 @app.post("/api/student/quiz/submit")
 async def submit_quiz_attempt(payload: dict = Body(...), db: Session = Depends(get_db)):
-    attempt_id = payload.get("attempt_id")
-    student_id = payload.get("student_id")
-    quiz_id = payload.get("quiz_id")
-    responses = payload.get("responses", [])
+    print("SUBMIT payload:", payload)
+
+    attempt_id = payload.get("attempt_id") or payload.get("attemptId")
+    student_id = payload.get("student_id") or payload.get("studentId")
+    quiz_id = payload.get("quiz_id") or payload.get("quizId")
+
+    raw_responses = payload.get("responses") or payload.get("answers") or []
+
+    responses = []
+    for r in raw_responses:
+        responses.append({
+            "mcq_id": r.get("mcq_id") or r.get("question_id") or r.get("id"),
+            "selected_answer": r.get("selected_answer") or r.get("answer") or r.get("selected")
+        })
 
     if not attempt_id or not student_id or not quiz_id:
         raise HTTPException(status_code=400, detail="Missing required fields")
@@ -2160,19 +2218,30 @@ async def submit_quiz_attempt(payload: dict = Body(...), db: Session = Depends(g
 
     correct_count = 0
     total = len(responses)
+    per_question_results = []
 
     for resp in responses:
-        mcq_id = resp.get("mcq_id")
-        selected = resp.get("selected_answer")
-        
+        mcq_id = resp["mcq_id"]
+        selected = resp["selected_answer"]
+
         mcq = db.query(MCQ).filter(MCQ.id == mcq_id).first()
         if not mcq:
             continue
-            
+
         is_correct = (selected == mcq.answer)
         if is_correct:
             correct_count += 1
 
+        # ✅ Per-question result for UI
+        per_question_results.append({
+            "mcq_id": mcq_id,
+            "selected": selected,
+            "correct": is_correct,
+            "correct_answer": mcq.answer,
+            "hint": None,
+        })
+
+        # ✅ Save/update MCQResponse row (with question)
         existing_response = db.query(MCQResponse).filter(
             MCQResponse.attempt_id == attempt_id,
             MCQResponse.mcq_id == mcq_id
@@ -2185,6 +2254,7 @@ async def submit_quiz_attempt(payload: dict = Body(...), db: Session = Depends(g
             new_response = MCQResponse(
                 attempt_id=attempt_id,
                 mcq_id=mcq_id,
+                question=mcq.question,           # ✅ required field
                 selected_answer=selected,
                 is_correct=is_correct
             )
@@ -2195,7 +2265,7 @@ async def submit_quiz_attempt(payload: dict = Body(...), db: Session = Depends(g
     attempt.completed = True
     db.commit()
 
-    # ✅ Broadcast
+    # ✅ Broadcast to instructor dashboard
     await manager.broadcast(quiz_id, {
         "type": "submission",
         "student_id": student_id,
@@ -2209,9 +2279,22 @@ async def submit_quiz_attempt(payload: dict = Body(...), db: Session = Depends(g
         "success": True,
         "score": correct_count,
         "total": total,
-        "percentage": round((correct_count / total * 100) if total > 0 else 0, 1)
+        "percentage": round((correct_count / total * 100) if total > 0 else 0, 1),
+        "results": per_question_results
     }
 
+@app.get("/api/quiz/{quiz_id}/questions")
+def get_quiz_questions_unfiltered(quiz_id: str, db: Session = Depends(get_db)):
+    mcqs = db.query(MCQ).filter(MCQ.quiz_id == quiz_id).all()
+    return [
+        {
+            "id": m.id,
+            "question": m.question,
+            "options": m.options,
+            "difficulty": m.difficulty or "Medium",
+            "bloom_level": m.bloom_level or "Remember"
+        } for m in mcqs
+    ]
 
 # ✅ Add endpoint to get live quiz stats for instructor
 @app.get("/api/quiz/{quiz_id}/live-stats")
@@ -2220,6 +2303,8 @@ async def get_quiz_live_stats(quiz_id: str, db: Session = Depends(get_db)):
         QuizAttempt.quiz_id == quiz_id,
         QuizAttempt.completed == True
     ).all()
+    print("LIVE STATS quiz_id:", quiz_id)
+    print("All attempt quiz_ids:", [a.quiz_id for a in db.query(QuizAttempt).all()])
 
     if not attempts:
         return {
