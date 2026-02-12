@@ -15,7 +15,7 @@ from sqlalchemy import text as sql_text
 from pydantic import BaseModel, Field
 from llama_index.llms.gemini import Gemini
 from pptx import Presentation
-from typing import List, Optional
+from typing import List, Optional, Dict, Set
 from collections import deque, defaultdict
 from datetime import datetime
 
@@ -171,24 +171,34 @@ class LockPreviewPayload(BaseModel):
 
 class ConnectionManager:
     def __init__(self):
-        self.active_connections: List[WebSocket] = []
+        self.active_connections: Dict[str, Set[WebSocket]] = {}
 
-    async def connect(self, websocket: WebSocket):
+    async def connect(self, websocket: WebSocket, quiz_id: str):
         await websocket.accept()
-        self.active_connections.append(websocket)
+        if quiz_id not in self.active_connections:
+            self.active_connections[quiz_id] = set()
+        self.active_connections[quiz_id].add(websocket)
+        print(f"✅ Instructor connected to quiz {quiz_id}")
 
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
+    def disconnect(self, websocket: WebSocket, quiz_id: str):
+        if quiz_id in self.active_connections:
+            self.active_connections[quiz_id].discard(websocket)
+            if not self.active_connections[quiz_id]:
+                del self.active_connections[quiz_id]
+        print(f"❌ Instructor disconnected from quiz {quiz_id}")
 
-    async def send_personal_message(self, message: str, websocket: WebSocket):
-        await websocket.send_text(message)
-
-    async def broadcast(self, message: str):
-        for connection in self.active_connections:
-            try:
-                await connection.send_text(message)
-            except:
-                pass
+    async def broadcast(self, quiz_id: str, message: dict):
+        if quiz_id in self.active_connections:
+            dead_connections = set()
+            for connection in self.active_connections[quiz_id]:
+                try:
+                    await connection.send_json(message)
+                except Exception as e:
+                    print(f"Failed to send to connection: {e}")
+                    dead_connections.add(connection)
+            
+            for conn in dead_connections:
+                self.active_connections[quiz_id].discard(conn)
 
 manager = ConnectionManager()
 
@@ -1341,6 +1351,16 @@ async def websocket_endpoint(websocket: WebSocket, course_id: str, week: int):
     except WebSocketDisconnect:
         manager.disconnect(websocket)
 
+# ✅ WebSocket endpoint for instructors 
+@app.websocket("/ws/quiz/{quiz_id}")
+async def websocket_endpoint(websocket: WebSocket, quiz_id: str):
+    await manager.connect(websocket, quiz_id)
+    try:
+        while True:
+            data = await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket, quiz_id)
+
 # --- 1. Create a quiz (Instructor) ---
 @app.post("/api/quiz/create")
 async def create_quiz(request: QuizCreate, db: Session = Depends(get_db)):
@@ -2116,95 +2136,121 @@ async def update_mcq(mcq_id: str, payload: MCQUpdate, db: Session = Depends(get_
 
 
 @app.post("/api/student/quiz/submit")
-async def submit_quiz_attempt(
-    attempt_id: str = Body(..., embed=True),
-    responses: dict = Body(..., embed=True),
-    db: Session = Depends(get_db)
-):
+async def submit_quiz_attempt(payload: dict = Body(...), db: Session = Depends(get_db)):
+    attempt_id = payload.get("attempt_id")
+    student_id = payload.get("student_id")
+    quiz_id = payload.get("quiz_id")
+    responses = payload.get("responses", [])
+
+    if not attempt_id or not student_id or not quiz_id:
+        raise HTTPException(status_code=400, detail="Missing required fields")
+
     attempt = db.query(QuizAttempt).filter(QuizAttempt.id == attempt_id).first()
     if not attempt:
-        raise HTTPException(status_code=404, detail="Attempt not found")
+        attempt = QuizAttempt(
+            id=attempt_id,
+            quiz_id=quiz_id,
+            student_id=student_id,
+            score=0,
+            total_questions=0,
+            completed=False
+        )
+        db.add(attempt)
+        db.commit()
 
-    score = 0
-    total = 0
-    results = []
-    
-    # Fetch Settings for style
-    settings = None
-    try:
-        settings = db.query(QuizSettings).filter(QuizSettings.quiz_id == attempt.quiz_id).first()
-    except:
-        settings = db.query(QuizSettings).filter(QuizSettings.quizid == attempt.quiz_id).first()
+    correct_count = 0
+    total = len(responses)
+
+    for resp in responses:
+        mcq_id = resp.get("mcq_id")
+        selected = resp.get("selected_answer")
         
-    def get_setting(obj, name, default):
-        if not obj: return default
-        val = getattr(obj, name, getattr(obj, name.replace("feedback", "feedback_"), None))
-        return val if val is not None else default
-
-    style = get_setting(settings, 'feedbackstyle', "Immediate")
-
-    # Iterate responses
-    for mcq_id, selected_opt in responses.items():
-        total += 1
         mcq = db.query(MCQ).filter(MCQ.id == mcq_id).first()
-        
         if not mcq:
-            results.append({
-                "mcq_id": mcq_id,
-                "selected": selected_opt,
-                "correct": False,
-                "error": "Question not found"
-            })
             continue
-
-        # --- ROBUST CHECK LOGIC (Same as check-answer) ---
-        stored_ans = (mcq.answer or "").strip()
-        user_ans = (selected_opt or "").strip()
-        is_correct = stored_ans.lower() == user_ans.lower()
-
-        # Legacy Fallback
-        if not is_correct and len(stored_ans) == 1 and stored_ans.upper() in ['A', 'B', 'C', 'D']:
-            try:
-                options_list = mcq.options
-                if isinstance(options_list, str):
-                    options_list = json.loads(options_list)
-                
-                if isinstance(options_list, list):
-                    idx = ord(stored_ans.upper()) - 65
-                    if 0 <= idx < len(options_list):
-                        correct_text = str(options_list[idx]).strip()
-                        if correct_text.lower() == user_ans.lower():
-                            is_correct = True
-            except:
-                pass
-        # ------------------------------------------------
-
-        if is_correct:
-            score += 1
             
-        feedback_item = {
-            "mcq_id": mcq_id,
-            "selected": selected_opt,
-            "correct": is_correct
-        }
-        
-        # If Summary mode or finished, maybe show correct answer?
-        # Usually we return it so frontend can display "Correct Answer was: X"
-        feedback_item["correct_answer"] = mcq.answer 
+        is_correct = (selected == mcq.answer)
+        if is_correct:
+            correct_count += 1
 
-        results.append(feedback_item)
+        existing_response = db.query(MCQResponse).filter(
+            MCQResponse.attempt_id == attempt_id,
+            MCQResponse.mcq_id == mcq_id
+        ).first()
 
-    # Update Attempt in DB
-    attempt.score = score
-    attempt.responses = responses # Save raw JSON map
+        if existing_response:
+            existing_response.selected_answer = selected
+            existing_response.is_correct = is_correct
+        else:
+            new_response = MCQResponse(
+                attempt_id=attempt_id,
+                mcq_id=mcq_id,
+                selected_answer=selected,
+                is_correct=is_correct
+            )
+            db.add(new_response)
+
+    attempt.score = correct_count
+    attempt.total_questions = total
+    attempt.completed = True
     db.commit()
 
-    return {
-        "score": score,
+    # ✅ Broadcast
+    await manager.broadcast(quiz_id, {
+        "type": "submission",
+        "student_id": student_id,
+        "attempt_id": attempt_id,
+        "score": correct_count,
         "total": total,
-        "results": results,
-        "style": style
+        "timestamp": datetime.now().isoformat()
+    })
+
+    return {
+        "success": True,
+        "score": correct_count,
+        "total": total,
+        "percentage": round((correct_count / total * 100) if total > 0 else 0, 1)
     }
+
+
+# ✅ Add endpoint to get live quiz stats for instructor
+@app.get("/api/quiz/{quiz_id}/live-stats")
+async def get_quiz_live_stats(quiz_id: str, db: Session = Depends(get_db)):
+    attempts = db.query(QuizAttempt).filter(
+        QuizAttempt.quiz_id == quiz_id,
+        QuizAttempt.completed == True
+    ).all()
+
+    if not attempts:
+        return {
+            "total_submissions": 0,
+            "average_score": 0,
+            "submissions": []
+        }
+
+    submissions = []
+    total_score = 0
+    
+    for attempt in attempts:
+        student = db.query(User).filter(User.id == attempt.student_id).first()
+        student_name = f"{student.first_name} {student.last_name}" if student else "Unknown"
+        
+        submissions.append({
+            "student_id": attempt.student_id,
+            "student_name": student_name,
+            "score": attempt.score,
+            "total": attempt.total_questions,
+            "percentage": round((attempt.score / attempt.total_questions * 100) if attempt.total_questions > 0 else 0, 1),
+            "timestamp": attempt.created_at.isoformat() if hasattr(attempt, 'created_at') else None
+        })
+        total_score += (attempt.score / attempt.total_questions * 100) if attempt.total_questions > 0 else 0
+
+    return {
+        "total_submissions": len(attempts),
+        "average_score": round(total_score / len(attempts), 1) if attempts else 0,
+        "submissions": submissions
+    }
+
 
 @app.post("/api/student/quiz/check-answer")
 async def check_answer_mcq(
@@ -2214,22 +2260,18 @@ async def check_answer_mcq(
     attempt_count: int = Body(1, embed=True),
     db: Session = Depends(get_db)
 ):
-    # 1. Fetch Question
     mcq = db.query(MCQ).filter(MCQ.id == mcq_id).first()
     if not mcq:
         raise HTTPException(status_code=404, detail="Question not found")
 
-    # 2. Fetch Settings safely
     settings = None
     try:
         settings = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
     except AttributeError:
         settings = db.query(QuizSettings).filter(QuizSettings.quizid == quiz_id).first()
 
-    # SAFE ATTRIBUTE ACCESS HELPER
     def get_setting(obj, name, default):
         if not obj: return default
-        # Try: name, name_with_underscore, default
         val = getattr(obj, name, getattr(obj, name.replace("feedback", "feedback_").replace("allowed", "allowed_"), None))
         return val if val is not None else default
 
@@ -2237,13 +2279,11 @@ async def check_answer_mcq(
     style = raw_style.lower().strip()
     max_retries = get_setting(settings, 'allowedretries', 3)
 
-    # 3. ROBUST ANSWER CHECKING
     stored_ans = (mcq.answer or "").strip()
     user_ans = (selected_opt or "").strip()
     
     is_correct = stored_ans.lower() == user_ans.lower()
 
-    # Legacy Fallback (A/B/C/D)
     if not is_correct and len(stored_ans) == 1 and stored_ans.upper() in ['A', 'B', 'C', 'D']:
         try:
             options_list = mcq.options
@@ -2259,7 +2299,6 @@ async def check_answer_mcq(
         except Exception as e:
             print(f"Legacy answer check failed: {e}")
 
-    # 4. Construct Response
     response = {
         "correct": is_correct,
         "style": raw_style,

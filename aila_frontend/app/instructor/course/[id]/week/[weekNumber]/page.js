@@ -11,6 +11,7 @@ import QuizCreator from "../../../../../components/QuizCreator";
 import UploadedFilesList from "../../../../../components/UploadedFilesList";
 import ConceptGraph from "../../../../../components/ConceptGraph";
 import QuizSettingsForm from "../../../../../components/QuizSettingsForm";
+import InstructorDashboard from '../../../../../components/InstructorDashboard';
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
 const WEEK_COUNT = 11;
@@ -778,6 +779,10 @@ export default function CourseWeekPage({ params }) {
                  <h2 className="text-xl font-bold text-gray-800">Your Quizzes <span className="text-gray-500 text-base font-normal">({quizzes.length})</span></h2>
                  <button onClick={fetchQuizzes} className="text-sm text-blue-600 hover:underline">Refresh</button>
                </div>
+
+               <div className="p-4 space-y-4 flex-1">
+                 <InstructorDashboard quizId={selectedQuizId} /> 
+               </div>
                
                <div className="p-4 space-y-4 flex-1">
                  {quizzes.length === 0 && <p className="text-gray-400 italic text-sm text-center py-10">No quizzes created yet.</p>}
@@ -920,6 +925,7 @@ export default function CourseWeekPage({ params }) {
                     <span className="text-4xl mb-4">👈</span>
                     <p className="font-medium text-lg">Select a quiz from the left</p>
                  </div>
+                 
                )}
              </div>
           </div>
