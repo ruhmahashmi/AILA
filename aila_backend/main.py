@@ -1,29 +1,24 @@
 from dotenv import load_dotenv
 load_dotenv()
 import os
+
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, Body
-from fastapi import WebSocket, WebSocketDisconnect
-from fastapi import Path
+from fastapi import WebSocket, WebSocketDisconnect, Path
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, Depends, HTTPException, Form
+
 from sqlalchemy.orm import Session
-from sqlalchemy import Column, Integer, String, DateTime, create_engine, ForeignKey, Text, JSON, text as sql_text
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session, relationship
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, JSON
 from sqlalchemy.sql import func
-from sqlalchemy import Boolean, ARRAY
+from sqlalchemy import Boolean
 from sqlalchemy import text as sql_text
-from sqlalchemy import text as sqltext
-from sqlalchemy import text
-from sqlalchemy import and_
+
 from pydantic import BaseModel, Field
 from llama_index.llms.gemini import Gemini
 from pptx import Presentation
-from typing import List
+from typing import List, Optional
 from collections import deque, defaultdict
 from datetime import datetime
-from typing import Optional
-from models import LectureProcessing, KnowledgeGraph
+
 import asyncio
 import fitz  # PyMuPDF
 import hashlib
@@ -35,215 +30,26 @@ import json
 import re
 import logging
 import google.generativeai as genai
-from collections import deque
 
-UPLOAD_DIR = "db/uploads"  
+from aila_backend.database import SessionLocal, Base, engine
+from aila_backend.models import (
+    User,
+    Course,
+    Enrollment,
+    LectureUpload,
+    LectureProcessing,
+    Segment,
+    KnowledgeGraph,
+    Quiz,
+    MCQ,
+    QuizSettings,
+    QuizAttempt,
+    MCQResponse,
+)
+
+UPLOAD_DIR = "db/uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
-
 genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
-
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///ailastar.db")
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {})
-
-engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=3600)
-SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
-Base = declarative_base()
-
-# ====== MODELS ======
-class User(Base):
-    __tablename__ = "users"
-    id = Column(String(36), primary_key=True, index=True)
-    email = Column(String(255), unique=True, index=True, nullable=False)
-    password = Column(String(255), nullable=False)
-    role = Column(String(50), nullable=False)
-
-class Enrollment(Base):
-    __tablename__ = "enrollments"
-    id = Column(String(36), primary_key=True, index=True)
-    course_id = Column(String(36), ForeignKey("courses.id"))
-    student_id = Column(String(36), ForeignKey("users.id"))
-    enrolled_at = Column(DateTime(timezone=True), server_default=func.now())
-
-class Course(Base):
-    __tablename__ = "courses"
-    id = Column(String(36), primary_key=True, index=True)
-    name = Column(String(255), nullable=False)
-    instructor_id = Column(String(36), ForeignKey("users.id"))
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    instructor = relationship("User")
-
-class LectureUpload(Base):
-    __tablename__ = "lecture_uploads"
-    id = Column(String(36), primary_key=True, index=True)
-    course_id = Column(String(36), ForeignKey("courses.id"))
-    week = Column(Integer, nullable=False)
-    file_name = Column(String(255), nullable=False)
-    file_url = Column(String(255), nullable=True)
-    uploaded_at = Column(DateTime(timezone=True), server_default=func.now())
-    status = Column(String(50), default="uploaded")
-    error = Column(Text, nullable=True)
-
-class LectureProcessing(Base):
-    __tablename__ = "lecture_processing"
-    id = Column(String(36), primary_key=True, index=True)
-    course_id = Column(String(36), nullable=False)
-    week = Column(Integer, nullable=False)
-    file_name = Column(String(255), nullable=False)
-    status = Column(String(32), default="pending")
-    progress = Column(Integer, default=0)  # percent
-    error_message = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
-
-class Segment(Base):
-    __tablename__ = "segments"
-    id = Column(String(36), primary_key=True, index=True)
-    upload_id = Column(String(36), ForeignKey("lecture_uploads.id"))
-    course_id = Column(String(36), ForeignKey("courses.id"))
-    week = Column(Integer, nullable=False)
-    segment_index = Column(Integer, nullable=False)
-    title = Column(String(255), nullable=True)
-    content = Column(Text, nullable=True)
-    keywords = Column(String(255), nullable=True)
-    summary = Column(Text, nullable=True)
-
-class MCQ(Base):
-    __tablename__ = "mcqs"
-    id = Column(String(36), primary_key=True, index=True)
-    quiz_id = Column(String(36), ForeignKey("quizzes.id"), nullable=True)  
-    concept_id = Column(String(255), nullable=True)                         
-    segment_id = Column(String(36), ForeignKey("segments.id"), nullable=True)
-
-    question = Column(Text, nullable=False)
-    options = Column(JSON, nullable=False)
-    answer = Column(Text, nullable=True)
-    difficulty = Column(String(20), default="Medium")
-
-    quiz = relationship("Quiz", backref="mcqs")
-    segment = relationship("Segment")
-
-
-class MCQReqModel(BaseModel):
-    course_id: str
-    week: int
-    concept_id: str
-    summary: str = ""
-    contents: str = ""
-
-class MCQPayload(BaseModel):
-    segment_id: str
-    content: str
-
-class KnowledgeGraphBase(Base):
-    __tablename__ = 'knowledge_graph'
-    id = Column(String(36), primary_key=True, index=True)
-    course_id = Column(String(36), nullable=False)  
-    week = Column(Integer, nullable=False)
-    node_data = Column(Text, nullable=False)       
-    edge_data = Column(Text, nullable=False)        
-
-
-class MCQConceptModel(BaseModel):
-    course_id: str
-    week: int
-    concept_id: str
-    summary: str = ""
-    contents: str = ""
-
-class Quiz(Base):
-    __tablename__ = "quizzes"
-    id = Column(String(36), primary_key=True, index=True)
-    name = Column(String(255), nullable=False)
-    course_id = Column(String(36), ForeignKey("courses.id"))
-    week = Column(Integer, nullable=False)
-    concept_ids = Column(JSON, nullable=False)  # List of KG node IDs or segment IDs
-    instructor_id = Column(String(36), ForeignKey("users.id"))
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-
-class QuizCreate(BaseModel):
-    name: str = "New Quiz"
-    course_id: str
-    week: int
-    instructor_id: str = "unknown"
-    concept_ids: List[str]
-
-class QuizAttempt(Base):
-    __tablename__ = "quiz_attempts"
-    id = Column(String(50), primary_key=True, index=True)
-    quiz_id = Column(String(50), ForeignKey('quizzes.id'))
-    student_id = Column(String(50), ForeignKey("users.id"))
-    started_at = Column(DateTime(timezone=True), server_default=func.now())
-    last_activity = Column(DateTime(timezone=True), onupdate=func.now())
-    responses = Column(JSON, default=dict)  # {mcq_id: {"answer": ..., "correct": ...}}
-    score = Column(Integer, nullable=True) 
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-class QuizSettings(Base):
-    __tablename__ = "quiz_settings"
-    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    quiz_id = Column(String(36), ForeignKey("quizzes.id"), nullable=False)
-    week = Column(Integer, nullable=False)
-    min_difficulty = Column(String(20), nullable=True)
-    max_difficulty = Column(String(20), nullable=True)
-    max_questions = Column(Integer, nullable=True)
-    allowed_retries = Column(Integer, nullable=True)
-    feedback_style = Column(String(20), nullable=True)
-    include_spaced = Column(Boolean, default=False)
-
-class QuizSettingsIn(BaseModel):
-    week: int
-    min_difficulty: Optional[str] = None
-    max_difficulty: Optional[str] = None
-    max_questions: Optional[int] = None
-    allowed_retries: Optional[int] = None
-    feedback_style: Optional[str] = None
-    include_spaced: bool = False
-
-class QuizSettingsOut(QuizSettingsIn):
-    id: int
-    quiz_id: str
-
-class QuizStartResponse(BaseModel):
-    attempt_id: str
-    questions: List[dict]
-    settings: dict
-    retries_left: int
-
-class MCQResponse(Base):
-    __tablename__ = "mcq_responses"
-    id = Column(String(36), primary_key=True, index=True)
-    attempt_id = Column(String(36), ForeignKey("quiz_attempts.id"))
-    mcq_id = Column(String(36), ForeignKey("mcqs.id"))
-    question = Column(Text, nullable=False)
-    selected = Column(String(255), nullable=True)
-    correct = Column(Boolean, default=False)
-    answered_at = Column(DateTime(timezone=True), server_default=func.now())
-
-class MethodFilter(logging.Filter):
-    def filter(self, record):
-        if record.args and len(record.args) >= 4:
-            method = record.args[1]  # GET, POST, etc.
-            status = str(record.args[3])  # status code
-            # Show POST/PUT/DELETE/PATCH + any errors (4xx/5xx)
-            if method in ("POST", "PUT", "DELETE", "PATCH"):
-                return True
-            if status.startswith(("4", "5")):
-                return True
-            return False
-        return False
-    
-
-class MCQUpdate(BaseModel):
-    question: str
-    options: List[str]
-    answer: str
-    difficulty: Optional[str] = "Medium"
-
-class GenerateQuizMCQsRequest(BaseModel):
-    action: str = "generate_from_concepts"
-
-class TitleGenRequest(BaseModel):
-    concepts: List[str]
 
 Base.metadata.create_all(bind=engine)
 
@@ -255,12 +61,99 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-# Attach filter to Uvicorn access logger so only key lines show
+
+class MethodFilter(logging.Filter):
+    def filter(self, record):
+        if record.args and len(record.args) >= 4:
+            method = record.args[1]
+            status = str(record.args[3])
+            if method in ("POST", "PUT", "DELETE", "PATCH"):
+                return True
+            if status.startswith(("4", "5")):
+                return True
+            return False
+        return False
+
 uvicorn_access_logger = logging.getLogger("uvicorn.access")
 uvicorn_access_logger.addFilter(MethodFilter())
 
 
-# Add WebSocket connection manager
+# === Pydantic Models (for API request/response validation) ===
+
+class MCQReqModel(BaseModel):
+    course_id: str
+    week: int
+    concept_id: str
+    summary: str = ""
+    contents: str = ""
+
+
+class MCQPayload(BaseModel):
+    segment_id: str
+    content: str
+
+
+class MCQConceptModel(BaseModel):
+    course_id: str
+    week: int
+    concept_id: str
+    summary: str = ""
+    contents: str = ""
+
+
+class QuizCreate(BaseModel):
+    name: str = "New Quiz"
+    course_id: str
+    week: int
+    instructor_id: str = "unknown"
+    concept_ids: List[str]
+
+
+class QuizSettingsIn(BaseModel):
+    week: int
+    min_difficulty: Optional[str] = None
+    max_difficulty: Optional[str] = None
+    max_questions: Optional[int] = None
+    allowed_retries: Optional[int] = None
+    feedback_style: Optional[str] = None
+    include_spaced: bool = False
+
+
+class QuizSettingsOut(QuizSettingsIn):
+    id: int
+    quiz_id: str
+
+
+class QuizStartResponse(BaseModel):
+    attempt_id: str
+    questions: List[dict]
+    settings: dict
+    retries_left: int
+
+
+class MCQUpdate(BaseModel):
+    question: str
+    options: List[str]
+    answer: str
+    difficulty: Optional[str] = "Medium"
+    bloom_level: Optional[str] = "Remember"
+
+
+class GenerateQuizMCQsRequest(BaseModel):
+    action: str = "generate_from_concepts"
+
+
+class TitleGenRequest(BaseModel):
+    concepts: List[str]
+
+
+class LockPreviewPayload(BaseModel):
+    quiz_id: str
+    items: List[dict]
+
+
+# === WebSocket Manager ===
+
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
@@ -280,17 +173,9 @@ class ConnectionManager:
             try:
                 await connection.send_text(message)
             except:
-                # Connection might be closed
                 pass
 
-            
-
 manager = ConnectionManager()
-
-# --- B. Lock previewed MCQs to a quiz (optional) ---
-class LockPreviewPayload(BaseModel):
-    quiz_id: str
-    items: List[dict]  # [{ "concept_id": "...", "mcqs": [ {...}, ... ] }, ...]
 
 
 def get_db():
@@ -300,9 +185,6 @@ def get_db():
     finally:
         db.close()
 
-@app.on_event("startup")
-def on_startup():
-    Base.metadata.create_all(bind=engine)
 
 def normalize_id(text):
     """Make sure every concept has the EXACT same ID everywhere"""
@@ -1092,12 +974,13 @@ async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_
                 
             if settings:
                 all_levels = ["Easy", "Medium", "Hard"]
-                mind = settings.mindifficulty or "Easy"
-                maxd = settings.maxdifficulty or "Hard"
+                mind = settings.min_difficulty or "Easy"
+                maxd = settings.max_difficulty or "Hard"
                 try:
                     start_idx = all_levels.index(mind)
                     end_idx = all_levels.index(maxd)
-                    if start_idx > end_idx: start_idx, end_idx = end_idx, start_idx
+                    if start_idx > end_idx: 
+                        start_idx, end_idx = end_idx, start_idx
                     allowed_str = ", ".join([f"'{x}'" for x in all_levels[start_idx : end_idx+1]])
                 except ValueError:
                     pass 
@@ -1107,28 +990,20 @@ async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_
     # 2. Fetch KG Context (Robust Attribute Access)
     kg_entry = None
     try:
-        # Try course_id (standard)
         kg_entry = db.query(KnowledgeGraph).filter(
             KnowledgeGraph.course_id == course_id,
-            KnowledgeGraph.week == week
+            KnowledgeGraph.week == week,
+            KnowledgeGraph.graph_type == "master"  # Use the master merged graph
         ).first()
-    except AttributeError:
-        # Try courseid (legacy/alternate)
-        try:
-            kg_entry = db.query(KnowledgeGraph).filter(
-                KnowledgeGraph.courseid == course_id,
-                KnowledgeGraph.week == week
-            ).first()
-        except Exception as e:
-            print(f"KG Attribute Lookup Error: {e}")
+    except Exception as e:
+        print(f"KG Lookup Error: {e}")
 
     selected_summary = ""
     selected_contents = ""
 
     if kg_entry:
         try:
-            # SAFELY access nodedata or node_data
-            raw_node_data = getattr(kg_entry, 'nodedata', getattr(kg_entry, 'node_data', None))
+            raw_node_data = kg_entry.node_data  # Use snake_case from unified models
             
             if raw_node_data:
                 kg_nodes = json.loads(raw_node_data)
@@ -1137,29 +1012,44 @@ async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_
                     selected_summary = selected_node.get('summary', '')
                     selected_contents = selected_node.get('contents', selected_summary)
             else:
-                print("Warning: KG entry found but no node data attribute matched.")
+                print("Warning: KG entry found but no node data.")
                 
         except json.JSONDecodeError:
             print("Error decoding KG JSON")
         except Exception as e:
             print(f"Error parsing KG nodes: {e}")
 
-    # 3. Prompt Generation (Strict Anti-Hallucination)
-    prompt = (
-        f"As an expert computer science instructor, create relevant multiple-choice questions (MCQs) for the concept '{concept_id}'.\n"
-        f"TARGET DIFFICULTIES: {allowed_str}.\n"
-        "Use the provided Summary and Details below for technical accuracy, but DO NOT REFER TO THEM in the questions.\n\n"
-        "STRICT RULES:\n"
-        "1. The questions must stand alone as standard exam questions.\n"
-        "2. NEVER use phrases like 'according to the text', 'as mentioned above', 'in the provided context'.\n"
-        "3. Provide exactly 4 options per question.\n"
-        "4. Include a 'difficulty' field for each question matching the target difficulties.\n"
-        "5. Respond ONLY as a JSON list.\n\n"
-        "Response Format:\n"
-        "[{'question': '...', 'options': ['A', 'B', 'C', 'D'], 'answer': '...', 'difficulty': '...'}]\n\n"
-        f"Summary:\n{selected_summary[:800]}\n"
-        f"Details:\n{selected_contents[:1200]}"
-    )
+    # 3. Prompt Generation (ALWAYS define prompt, even if no KG data)
+    prompt = f"""
+    As an expert computer science instructor, create relevant multiple-choice questions (MCQs) for the concept "{concept_id}".
+
+    TARGET DIFFICULTIES: {allowed_str}
+
+    BLOOM'S LEVELS (Mix these):
+    - Remember, Understand, Apply, Analyze
+
+    STRICT RULES:
+    1. Questions must be stand-alone.
+    2. Provide exactly 4 options per question.
+    3. Include 'difficulty' (Easy/Medium/Hard).
+    4. Include 'bloom_level' (Remember/Understand/Apply/Analyze).
+    5. Respond ONLY as a JSON list.
+
+    Response Format:
+    [
+    {{
+        "question": "...",
+        "options": ["A", "B", "C", "D"],
+        "answer": "Option Text",
+        "difficulty": "Medium",
+        "bloom_level": "Apply"
+    }}
+    ]
+
+    --- CONTEXT ---
+    Summary: {selected_summary[:800] if selected_summary else "No summary available."}
+    Details: {selected_contents[:1200] if selected_contents else "No additional details."}
+    """
 
     try:
         model = genai.GenerativeModel('models/gemini-2.5-flash')
@@ -1187,7 +1077,9 @@ async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_
 
     except Exception as ex:
         print(f"MCQ GENERATION ERROR: {ex}")
+        traceback.print_exc()
         return {"mcqs": []}
+
 
 
 @app.get("/api/mcqs/")
@@ -1471,7 +1363,6 @@ async def get_next_mcq_gemini(attempt_id: str, db: Session = Depends(get_db)):
     except Exception as e:
         print(f"[WARNING] Graph load failed for Quiz {quiz.id}: {e}")
         # Proceed with empty map - logic will fallback to random choice
-
     # 3. Pick Concept
     concept_ids = quiz.concept_ids or []
     next_concept_id = pick_next_concept(
@@ -1498,16 +1389,20 @@ async def get_next_mcq_gemini(attempt_id: str, db: Session = Depends(get_db)):
             "mcq_id": selected.id,
             "question": selected.question,
             "options": selected.options,
+            "difficulty": selected.difficulty,
+            "bloom_level": selected.bloom_level, 
             "concept_id": selected.concept_id
         }
 
     # 5. Generate New if None Exist
     print(f"⚡ Generating fresh MCQ for {next_concept_id}...")
     kg_payload = {
-        "course_id": quiz.course_id, 
-        "week": quiz.week, 
-        "concept_id": next_concept_id,
-        "quiz_id": quiz.id
+        "mcq_id": new_mcq.id,
+        "question": new_mcq.question,
+        "options": new_mcq.options,
+        "concept_id": new_mcq.concept_id,
+        "difficulty": new_mcq.difficulty, 
+        "bloom_level": new_mcq.bloom_level
     }
     
     try:
@@ -1524,7 +1419,8 @@ async def get_next_mcq_gemini(attempt_id: str, db: Session = Depends(get_db)):
                 question=first_q["question"],
                 options=first_q["options"],
                 answer=first_q["answer"],
-                difficulty=first_q.get("difficulty", "Medium")
+                difficulty=first_q.get("difficulty", "Medium"),
+                bloom_level=first_q.get("bloom_level", "Remember"),
             )
             db.add(new_mcq)
             db.commit()
@@ -1726,15 +1622,13 @@ async def get_quiz_settings(quiz_id: str, db: Session = Depends(get_db)):
 
 @app.post("/api/quiz/settings/{quiz_id}", response_model=QuizSettingsOut)
 async def upsert_quiz_settings(quiz_id: str, payload: QuizSettingsIn, db: Session = Depends(get_db)):
-    # 1. Fetch existing settings
     qs = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
-
+    
     if not qs:
-        # Create New
         qs = QuizSettings(
             quiz_id=quiz_id,
             week=payload.week,
-            min_difficulty=payload.min_difficulty,
+            min_difficulty=payload.min_difficulty, # Matches model
             max_difficulty=payload.max_difficulty,
             max_questions=payload.max_questions,
             allowed_retries=payload.allowed_retries,
@@ -1743,7 +1637,6 @@ async def upsert_quiz_settings(quiz_id: str, payload: QuizSettingsIn, db: Sessio
         )
         db.add(qs)
     else:
-        # Update Existing (clean direct assignment)
         qs.week = payload.week
         qs.min_difficulty = payload.min_difficulty
         qs.max_difficulty = payload.max_difficulty
@@ -1751,21 +1644,17 @@ async def upsert_quiz_settings(quiz_id: str, payload: QuizSettingsIn, db: Sessio
         qs.allowed_retries = payload.allowed_retries
         qs.feedback_style = payload.feedback_style
         qs.include_spaced = payload.include_spaced
-    
+        
     db.commit()
     db.refresh(qs)
     return qs
 
 
-
 @app.get("/api/quiz/questions/{quiz_id}")
 def get_quiz_questions(quiz_id: str, db: Session = Depends(get_db)):
-    # Use ORM to fetch MCQs safely
     try:
-        # Try fetching by quiz_id (standard)
         mcqs = db.query(MCQ).filter(MCQ.quiz_id == quiz_id).all()
     except AttributeError:
-        # Try fetching by quizid (legacy)
         mcqs = db.query(MCQ).filter(MCQ.quizid == quiz_id).all()
         
     out = []
@@ -1776,10 +1665,12 @@ def get_quiz_questions(quiz_id: str, db: Session = Depends(get_db)):
             "options": m.options,
             "answer": m.answer,
             "concept_id": m.concept_id,
-            "difficulty": m.difficulty or "Medium"
+            "difficulty": m.difficulty or "Medium",
+            "bloom_level": m.bloom_level or "Remember"  
         })
         
     return {"quiz_id": quiz_id, "mcqs": out}
+
 
 @app.post("/api/quiz/generate-title")
 async def generate_quiz_title(payload: TitleGenRequest):
@@ -1923,7 +1814,8 @@ async def generate_quiz_mcqs(quiz_id: str, payload: GenerateQuizMCQsRequest, db:
                     question=m.get("question"),
                     options=m.get("options"),
                     answer=m.get("answer"),
-                    difficulty=m.get("difficulty", "Medium")
+                    difficulty=m.get("difficulty", "Medium"), 
+                    bloom_level=m.get("bloom_level", "Remember"), 
                 )
                 
                 # Assign FK safely
@@ -1982,6 +1874,7 @@ async def regenerate_single_mcq(mcq_id: str, db: Session = Depends(get_db)):
         old_mcq.options = best_new["options"]
         old_mcq.answer = best_new["answer"]
         old_mcq.difficulty = best_new.get("difficulty", "Medium")
+        old_mcq.bloom_level = best_new.get("bloom_level", "Remember")
         
         db.commit()
         return {"status": "regenerated", "mcq": {
@@ -2127,6 +2020,7 @@ async def update_mcq(mcq_id: str, payload: MCQUpdate, db: Session = Depends(get_
     mcq.question = payload.question
     mcq.options = payload.options
     mcq.answer = payload.answer
+    mcq.bloom_level = payload.bloom_level 
     if payload.difficulty:
         mcq.difficulty = payload.difficulty
         
@@ -2140,7 +2034,8 @@ async def update_mcq(mcq_id: str, payload: MCQUpdate, db: Session = Depends(get_
             "question": mcq.question,
             "options": mcq.options,
             "answer": mcq.answer,
-            "difficulty": mcq.difficulty
+            "difficulty": mcq.difficulty,
+            "bloom_level": mcq.bloom_level
         }
     }
 

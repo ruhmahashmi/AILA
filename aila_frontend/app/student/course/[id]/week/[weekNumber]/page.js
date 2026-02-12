@@ -29,7 +29,7 @@ export default function StudentCourseWeekPage({ params }) {
   const [feedbackStatus, setFeedbackStatus] = useState("idle"); // "idle" | "checking" | "correct" | "incorrect"
   const [currentFeedback, setCurrentFeedback] = useState(null); // { correct, hint, correct_answer, retries_exhausted }
   
-  // NEW: Track retries per question ID { "mcq_id": count }
+  // Track retries per question ID { "mcq_id": count }
   const [retryCounts, setRetryCounts] = useState({});
 
   // 1. Fetch Quizzes & KG Labels on Load
@@ -58,7 +58,6 @@ export default function StudentCourseWeekPage({ params }) {
     loadData();
   }, [courseId, weekNumber]);
 
-
   // 2. Start Quiz Handler
   async function handleStartQuiz(quizId) {
     setActiveQuizId(quizId);
@@ -66,7 +65,7 @@ export default function StudentCourseWeekPage({ params }) {
     setQuizData(null);
     setResult(null);
     setAnswers({});
-    setRetryCounts({}); // Reset retries
+    setRetryCounts({});
     setCurrentQuestionIndex(0);
     setFeedbackStatus("idle");
     setCurrentFeedback(null);
@@ -95,14 +94,12 @@ export default function StudentCourseWeekPage({ params }) {
     }
   }
 
-
-  // 3. Check Answer Handler (Immediate Feedback)
+  // 3. Check Answer Handler
   async function handleCheckAnswer() {
     const currentQ = quizData.questions[currentQuestionIndex];
     const selected = answers[currentQ.id];
     if (!selected) return;
 
-    // Increment retry count locally
     const currentAttemptCount = (retryCounts[currentQ.id] || 0) + 1;
     setRetryCounts(prev => ({ ...prev, [currentQ.id]: currentAttemptCount }));
 
@@ -116,21 +113,19 @@ export default function StudentCourseWeekPage({ params }) {
           quiz_id: activeQuizId,
           mcq_id: currentQ.id,
           selected_opt: selected,
-          attempt_count: currentAttemptCount // Pass count to backend
+          attempt_count: currentAttemptCount
         })
       });
       
       if (!res.ok) throw new Error("Check failed");
 
-      const data = await res.json(); 
-      // data format: { correct: bool, style: str, retries_exhausted: bool, hint?: str, correct_answer?: str }
-      
+      const data = await res.json();
       setCurrentFeedback(data);
       
       if (data.correct) {
-          setFeedbackStatus("correct");
+        setFeedbackStatus("correct");
       } else {
-          setFeedbackStatus("incorrect");
+        setFeedbackStatus("incorrect");
       }
       
     } catch (e) { 
@@ -140,8 +135,7 @@ export default function StudentCourseWeekPage({ params }) {
     }
   }
 
-
-  // 4. Submit Handler (Finalize Quiz)
+  // 4. Submit Handler
   async function handleSubmit() {
     if (!confirm("Finish and submit quiz?")) return;
     setSubmitting(true);
@@ -164,10 +158,8 @@ export default function StudentCourseWeekPage({ params }) {
     }
   }
 
-
   // 5. Navigation Handlers
   function handleNext() {
-    // Reset feedback state for next question
     setFeedbackStatus("idle");
     setCurrentFeedback(null);
 
@@ -176,9 +168,7 @@ export default function StudentCourseWeekPage({ params }) {
     }
   }
 
-
   function handlePrev() {
-    // Reset feedback state when going back (optional: could cache it if needed)
     setFeedbackStatus("idle");
     setCurrentFeedback(null);
     
@@ -187,7 +177,6 @@ export default function StudentCourseWeekPage({ params }) {
     }
   }
 
-
   function handleBackToList() {
     setActiveQuizId(null);
     setQuizData(null);
@@ -195,7 +184,6 @@ export default function StudentCourseWeekPage({ params }) {
     setAnswers({});
     setCurrentQuestionIndex(0);
   }
-
 
   const WeekSelector = () => (
     <div className="w-64 border-r border-gray-200 bg-white h-screen overflow-y-auto hidden md:block flex-shrink-0">
@@ -223,7 +211,6 @@ export default function StudentCourseWeekPage({ params }) {
       </div>
     </div>
   );
-
 
   // --- RENDER: QUIZ TAKING MODE ---
   if (activeQuizId) {
@@ -318,7 +305,7 @@ export default function StudentCourseWeekPage({ params }) {
       );
     }
 
-    // --- QUIZ TAKING VIEW (One Question at a Time + Check Answer) ---
+    // --- QUIZ TAKING VIEW ---
     const currentQ = quizData.questions[currentQuestionIndex];
     const isLastQuestion = currentQuestionIndex === quizData.questions.length - 1;
     const progress = ((currentQuestionIndex + 1) / quizData.questions.length) * 100;
@@ -353,13 +340,14 @@ export default function StudentCourseWeekPage({ params }) {
           {/* Question Card */}
           <div className="bg-white p-8 rounded-3xl shadow-sm border border-gray-200 min-h-[400px] flex flex-col">
             <div className="flex-1">
-               {/* Difficulty Badge */}
-               <div className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider mb-4 ${
-                  currentQ.difficulty === 'Hard' ? 'bg-red-100 text-red-700' :
-                  currentQ.difficulty === 'Easy' ? 'bg-green-100 text-green-700' :
-                  'bg-yellow-100 text-yellow-800'
-               }`}>
-                 {currentQ.difficulty || "Medium"}
+               {/* ✅ Difficulty + Bloom Badges */}
+               <div className="flex items-center gap-2 mb-4">
+                 <span className={`badge badge-difficulty ${(currentQ.difficulty || 'Medium').toLowerCase()}`}>
+                   {currentQ.difficulty || "Medium"}
+                 </span>
+                 <span className="badge badge-bloom">
+                   Bloom: {currentQ.bloom_level || "Remember"}
+                 </span>
                </div>
 
                <h2 className="text-xl font-semibold text-gray-900 mb-6 leading-relaxed">
@@ -373,14 +361,11 @@ export default function StudentCourseWeekPage({ params }) {
                      <div 
                        key={opt} 
                        onClick={() => {
-                         // Only allow changing answer if not already correct
                          if (feedbackStatus !== "correct") {
                            setAnswers(prev => ({ ...prev, [currentQ.id]: opt }));
-                           
-                           // If changing answer after incorrect, reset feedback to let them check again
                            if (feedbackStatus === "incorrect") {
-                               setFeedbackStatus("idle");
-                               setCurrentFeedback(null);
+                             setFeedbackStatus("idle");
+                             setCurrentFeedback(null);
                            }
                          }
                        }}
@@ -424,7 +409,6 @@ export default function StudentCourseWeekPage({ params }) {
                     <div className="flex-1">
                       <div className="font-bold">{feedbackStatus === "correct" ? "Correct!" : "Incorrect"}</div>
                       
-                      {/* Detailed Feedback (Hints/Answers) */}
                       {!currentFeedback?.correct && (
                         <div className="mt-2 text-sm space-y-1">
                           {currentFeedback?.hint && (
@@ -449,8 +433,6 @@ export default function StudentCourseWeekPage({ params }) {
                  </button>
 
                  <div className="flex gap-3">
-                   {/* CHECK ANSWER BUTTON */}
-                   {/* Show if: Idle OR (Incorrect AND Retries Left) */}
                    {(feedbackStatus === "idle" || (feedbackStatus === "incorrect" && !currentFeedback?.retries_exhausted)) && (
                       <button
                         onClick={handleCheckAnswer}
@@ -465,8 +447,6 @@ export default function StudentCourseWeekPage({ params }) {
                       </button>
                    )}
 
-                   {/* NEXT / FINISH BUTTON */}
-                   {/* Show if: Correct OR (Incorrect AND Retries Exhausted) */}
                    {(feedbackStatus === "correct" || (feedbackStatus === "incorrect" && currentFeedback?.retries_exhausted)) && (
                       isLastQuestion ? (
                          <button
@@ -494,7 +474,7 @@ export default function StudentCourseWeekPage({ params }) {
     );
   }
 
-  // --- RENDER: LIST VIEW (Default) ---
+  // --- RENDER: LIST VIEW ---
   return (
     <div className="flex min-h-screen bg-gray-50">
       <WeekSelector />

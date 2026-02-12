@@ -35,8 +35,10 @@ function MCQCard({ q, i, knowledgeGraph, loadPreview }) {
     question: q.question,
     options: Array.isArray(q.options) ? q.options : [],
     answer: q.answer,
-    difficulty: q.difficulty || "Medium"
+    difficulty: q.difficulty || "Medium",
+    bloom_level: q.bloom_level || "Remember"  
   });
+  
 
   // Ensure options is always an array for rendering/editing
   useEffect(() => {
@@ -50,9 +52,10 @@ function MCQCard({ q, i, knowledgeGraph, loadPreview }) {
       question: q.question,
       options: opts,
       answer: q.answer,
-      difficulty: q.difficulty || "Medium"
+      difficulty: q.difficulty || "Medium",
+      bloom_level: q.bloom_level || "Remember"  
     });
-  }, [q]);
+  }, [q]);  
 
   const handleSave = async () => {
     setSaving(true);
@@ -133,18 +136,38 @@ function MCQCard({ q, i, knowledgeGraph, loadPreview }) {
 
         {/* Footer Actions */}
         <div className="flex justify-between items-center pt-3 border-t border-blue-100">
-           <div className="flex items-center gap-2">
-             <label className="text-xs font-bold text-gray-500 uppercase">Difficulty:</label>
-             <select 
+        <div className="flex items-center gap-4">
+            {/* Difficulty */}
+            <div className="flex items-center gap-2">
+              <label className="text-xs font-bold text-gray-500 uppercase">Difficulty:</label>
+              <select 
                 value={editedData.difficulty}
                 onChange={(e) => setEditedData({...editedData, difficulty: e.target.value})}
                 className="text-xs p-1.5 border border-gray-300 rounded bg-white focus:ring-1 focus:ring-blue-500 outline-none"
-             >
+              >
                 <option value="Easy">Easy</option>
                 <option value="Medium">Medium</option>
                 <option value="Hard">Hard</option>
-             </select>
-           </div>
+              </select>
+            </div>
+
+            {/* ✅ Bloom Level */}
+            <div className="flex items-center gap-2">
+              <label className="text-xs font-bold text-gray-500 uppercase">Bloom:</label>
+              <select 
+                value={editedData.bloom_level || "Remember"}
+                onChange={(e) => setEditedData({...editedData, bloom_level: e.target.value})}
+                className="text-xs p-1.5 border border-gray-300 rounded bg-white focus:ring-1 focus:ring-blue-500 outline-none"
+              >
+                <option value="Remember">Remember</option>
+                <option value="Understand">Understand</option>
+                <option value="Apply">Apply</option>
+                <option value="Analyze">Analyze</option>
+                <option value="Evaluate">Evaluate</option>
+                <option value="Create">Create</option>
+              </select>
+            </div>
+          </div>
 
           <div className="flex gap-2">
               <button 
@@ -181,17 +204,21 @@ function MCQCard({ q, i, knowledgeGraph, loadPreview }) {
         <div className="flex flex-col gap-1">
            <span className="text-xs font-bold text-gray-400 tracking-wider uppercase">Question {i + 1}</span>
            <div className="flex flex-wrap gap-2">
-              <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-100 uppercase tracking-wide">
-                {knowledgeGraph.nodes?.find(n => n.id === q.concept_id)?.label || q.concept_id || "Concept"}
-              </span>
-              <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold border uppercase tracking-wide ${
-                 q.difficulty === 'Hard' ? 'bg-red-50 text-red-700 border-red-100' :
-                 q.difficulty === 'Easy' ? 'bg-green-50 text-green-700 border-green-100' :
-                 'bg-yellow-50 text-yellow-700 border-yellow-100'
-              }`}>
-                 {q.difficulty || "Medium"}
-              </span>
-           </div>
+            <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-100 uppercase tracking-wide">
+              {knowledgeGraph.nodes?.find(n => n.id === q.concept_id)?.label || q.concept_id || "Concept"}
+            </span>
+            <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold border uppercase tracking-wide ${
+                q.difficulty === 'Hard' ? 'bg-red-50 text-red-700 border-red-100' :
+                q.difficulty === 'Easy' ? 'bg-green-50 text-green-700 border-green-100' :
+                'bg-yellow-50 text-yellow-700 border-yellow-100'
+            }`}>
+                {q.difficulty || "Medium"}
+            </span>
+            {/* ✅ ADD BLOOM BADGE */}
+            <span className="badge badge-bloom">
+                {q.bloom_level || "Remember"}
+            </span>
+          </div>
         </div>
         
         {/* Actions */}
@@ -346,7 +373,7 @@ export default function CourseWeekPage({ params }) {
       console.error("Failed to fetch graph list", e);
     }
   }, [courseId, week]);
-  
+
   const fetchKnowledgeGraph = useCallback(async () => {
     if (!courseId || !Number.isFinite(week)) return;
 

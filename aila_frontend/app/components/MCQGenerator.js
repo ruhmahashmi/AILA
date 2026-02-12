@@ -66,52 +66,144 @@ export default function MCQGenerator({
   }
 
   return (
-    <div style={{ marginTop: 24 }}>
-      <div style={{ display: "flex", gap: 16, marginBottom: 8 }}>
+    <div className="mt-6">
+      {/* Action Buttons */}
+      <div className="flex gap-4 mb-4">
         <button
-          className="bg-blue-700 text-white px-4 py-1 rounded hover:bg-blue-800"
+          className="bg-blue-700 text-white px-4 py-2 rounded-lg hover:bg-blue-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           onClick={handleGenerateRaw}
           disabled={loading}
         >
-          {loading ? "Generating MCQs..." : "Teaching Assistant: Generate MCQs (Raw)"}
+          {loading ? "Generating..." : "🎓 Generate MCQs (Raw)"}
         </button>
         <button
-          className="bg-purple-700 text-white px-4 py-1 rounded hover:bg-purple-800"
+          className="bg-purple-700 text-white px-4 py-2 rounded-lg hover:bg-purple-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           onClick={handleGenerateKG}
           disabled={loadingKG}
         >
-          {loadingKG ? "Generating KG MCQs..." : "Teaching Assistant: Generate MCQs (KG)"}
+          {loadingKG ? "Generating..." : "🧠 Generate MCQs (Knowledge Graph)"}
         </button>
       </div>
-      {error && <div className="text-red-700 mb-2">{error}</div>}
-      {(loading || loadingKG) && (
-        <div className="text-blue-500">MCQs are being generated…</div>
+
+      {/* Error Message */}
+      {error && (
+        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg mb-4">
+          {error}
+        </div>
       )}
+
+      {/* Loading State */}
+      {(loading || loadingKG) && (
+        <div className="bg-blue-50 border border-blue-200 text-blue-700 px-4 py-3 rounded-lg mb-4">
+          ⏳ Generating MCQs with AI...
+        </div>
+      )}
+
+      {/* MCQ Display */}
       {mcqs.length > 0 && (
-        <div className="mt-4">
-          <h3 className="font-semibold mb-2">MCQs</h3>
-          <ul>
+        <div className="mt-6">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-semibold text-gray-800">
+              Generated MCQs ({mcqs.length})
+            </h3>
+          </div>
+
+          <div className="space-y-4">
             {mcqs.map((q, idx) => (
-              <li key={idx} className="mb-3">
-                <div className="font-medium">{`${idx + 1}. ${q.question}`}</div>
-                <ol type="A" className="ml-6">
+              <div
+                key={idx}
+                className="bg-white border border-gray-200 rounded-lg p-5 shadow-sm hover:shadow-md transition-shadow"
+              >
+                {/* Question Header with Tags */}
+                <div className="flex items-start justify-between mb-3">
+                  <div className="font-semibold text-gray-800 flex-1 pr-4">
+                    {idx + 1}. {q.question}
+                  </div>
+                  <div className="flex gap-2 flex-shrink-0">
+                    {/* ✅ Difficulty Badge */}
+                    <span className={`badge badge-difficulty ${(q.difficulty || 'medium').toLowerCase()}`}>
+                      {q.difficulty || "Medium"}
+                    </span>
+                    {/* ✅ Bloom Level Badge */}
+                    <span className="badge badge-bloom">
+                      {q.bloom_level || "Remember"}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Options */}
+                <ol type="A" className="ml-6 space-y-1.5">
                   {q.options &&
                     q.options.map((opt, oi) => (
-                      <li key={oi}>
+                      <li
+                        key={oi}
+                        className={`py-1 ${
+                          q.answer === opt
+                            ? "text-green-700 font-semibold"
+                            : "text-gray-700"
+                        }`}
+                      >
                         {opt}
                         {q.answer === opt && (
-                          <span className="text-green-600 font-bold ml-2">
-                            (Answer)
+                          <span className="ml-2 px-2 py-0.5 bg-green-100 text-green-800 text-xs rounded-full">
+                            ✓ Correct Answer
                           </span>
                         )}
                       </li>
                     ))}
                 </ol>
-              </li>
+
+                {/* Optional: Show concept ID */}
+                {q.concept_id && (
+                  <div className="mt-3 text-xs text-gray-500">
+                    Concept: <span className="font-mono">{q.concept_id}</span>
+                  </div>
+                )}
+              </div>
             ))}
-          </ul>
+          </div>
         </div>
       )}
+
+      {/* No MCQs State */}
+      {!loading && !loadingKG && mcqs.length === 0 && !error && (
+        <div className="text-center text-gray-500 py-8">
+          Click a button above to generate MCQs
+        </div>
+      )}
+
+      {/* ✅ Styles */}
+      <style jsx>{`
+        .badge {
+          padding: 4px 10px;
+          border-radius: 12px;
+          font-size: 11px;
+          font-weight: 600;
+          text-transform: uppercase;
+          white-space: nowrap;
+        }
+
+        .badge-difficulty {
+          color: white;
+        }
+
+        .badge-difficulty.easy {
+          background: #10b981;
+        }
+
+        .badge-difficulty.medium {
+          background: #f59e0b;
+        }
+
+        .badge-difficulty.hard {
+          background: #ef4444;
+        }
+
+        .badge-bloom {
+          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+          color: white;
+        }
+      `}</style>
     </div>
   );
 }

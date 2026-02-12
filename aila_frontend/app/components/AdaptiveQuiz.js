@@ -7,7 +7,7 @@ const BACKEND_URL = "http://localhost:8000";
 
 export default function AdaptiveQuiz({ quizId, attemptId: attemptIdProp, onQuizEnd }) {
   const [attemptId, setAttemptId] = useState(attemptIdProp || null);
-  const [mcq, setMcq] = useState(null); // { mcq_id, question, options, answer?, concept_id }
+  const [mcq, setMcq] = useState(null); // { mcq_id, question, options, answer?, concept_id, difficulty, bloom_level }
   const [answers, setAnswers] = useState([]);
   const [done, setDone] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -56,13 +56,15 @@ export default function AdaptiveQuiz({ quizId, attemptId: attemptIdProp, onQuizE
           setError("No more questions in this quiz.");
           setDone(true);
         } else {
-          // Expect backend to return concept_id too
+          // ✅ Now capturing difficulty and bloom_level from backend
           setMcq({
             mcq_id: data.mcq_id,
             question: data.question,
             options: data.options || [],
             answer: data.answer, // may be omitted for graded mode
             concept_id: data.concept_id || null,
+            difficulty: data.difficulty || "Medium",
+            bloom_level: data.bloom_level || "Remember",
           });
         }
       } catch {
@@ -162,14 +164,35 @@ export default function AdaptiveQuiz({ quizId, attemptId: attemptIdProp, onQuizE
   const showFeedback = !!lastAnswer && lastAnswer.question === mcq.question;
 
   return (
-    <div className="bg-white border rounded p-4">
-      <div className="mb-2 font-semibold">Question {answers.length + 1}</div>
-      <div className="mb-2">{mcq.question}</div>
-      <ul>
+    <div className="bg-white border rounded-lg shadow-md p-6">
+      {/* ✅ Question Header with Metadata Tags */}
+      <div className="flex items-center justify-between mb-4">
+        <div className="font-semibold text-lg text-gray-800">
+          Question {answers.length + 1}
+        </div>
+        <div className="flex gap-2">
+          {/* Difficulty Badge */}
+          <span className={`badge badge-difficulty ${mcq.difficulty.toLowerCase()}`}>
+            {mcq.difficulty}
+          </span>
+          {/* ✅ Bloom Level Badge */}
+          <span className="badge badge-bloom">
+            Bloom: {mcq.bloom_level}
+          </span>
+        </div>
+      </div>
+
+      {/* Question Text */}
+      <div className="mb-4 text-gray-700 text-base leading-relaxed">
+        {mcq.question}
+      </div>
+
+      {/* Options */}
+      <ul className="space-y-2">
         {mcq.options.map((opt, idx) => (
           <li key={idx}>
             <button
-              className="block my-1 px-4 py-2 rounded bg-blue-100 hover:bg-blue-300"
+              className="block w-full text-left px-4 py-3 rounded-lg bg-blue-50 hover:bg-blue-100 border border-blue-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               disabled={loading || showFeedback}
               onClick={() => submitAnswer(opt)}
             >
@@ -178,25 +201,62 @@ export default function AdaptiveQuiz({ quizId, attemptId: attemptIdProp, onQuizE
           </li>
         ))}
       </ul>
+
+      {/* Feedback */}
       {showFeedback && (
-        <div className="mt-3 text-sm">
+        <div className="mt-4 p-3 rounded-lg text-sm">
           {lastAnswer.correct ? (
-            <span className="text-green-700">Correct!</span>
+            <div className="text-green-700 bg-green-50 border border-green-200 p-3 rounded">
+              ✓ Correct!
+            </div>
           ) : (
-            <span className="text-red-700">
-              Incorrect.&nbsp;Correct answer:{" "}
-              <strong>{mcq.answer}</strong>
-            </span>
+            <div className="text-red-700 bg-red-50 border border-red-200 p-3 rounded">
+              ✗ Incorrect. Correct answer: <strong>{mcq.answer}</strong>
+            </div>
           )}
         </div>
       )}
+
+      {/* Quit Button */}
       <button
         onClick={quit}
         disabled={loading}
-        className="mt-4 px-3 py-1 bg-red-200 rounded"
+        className="mt-6 px-4 py-2 bg-red-100 hover:bg-red-200 text-red-700 rounded-lg transition-colors disabled:opacity-50"
       >
         Quit and Show Score
       </button>
+
+      {/* ✅ Add styles inline or in your CSS file */}
+      <style jsx>{`
+        .badge {
+          padding: 4px 10px;
+          border-radius: 12px;
+          font-size: 11px;
+          font-weight: 600;
+          text-transform: uppercase;
+        }
+
+        .badge-difficulty {
+          color: white;
+        }
+
+        .badge-difficulty.easy {
+          background: #10b981;
+        }
+
+        .badge-difficulty.medium {
+          background: #f59e0b;
+        }
+
+        .badge-difficulty.hard {
+          background: #ef4444;
+        }
+
+        .badge-bloom {
+          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+          color: white;
+        }
+      `}</style>
     </div>
   );
 }

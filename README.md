@@ -27,9 +27,8 @@ AILA (AI‑powered Intelligent Lecturing Assistant) is a research system that su
 
 See `aila_backend/README.md` for detailed backend setup.
 
-1. `cd aila_backend`
-2. `pip install -r requirements.txt`
-3. `uvicorn main:app --reload`
+1. `pip install -r requirements.txt`
+2. `uvicorn aila_backend.main:app --reload`
 
 The backend will create `ailastar.db` automatically and listens on `process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'` by default.
 
