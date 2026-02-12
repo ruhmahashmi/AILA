@@ -986,46 +986,21 @@ async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_
     concept_id = payload.get("concept_id") or payload.get("segment_id")
     quiz_id = payload.get("quiz_id")
     
-    # 1. Determine Difficulty Range
-    allowed_difficulties = ["Easy", "Medium", "Hard"]
-    allowed_str = "'Easy', 'Medium', 'Hard'"
+    print(f"[MCQ GEN] Starting generation for concept: {concept_id}, quiz: {quiz_id}")
     
-    # 2. Determine Bloom Level Range
+    # 1. Determine Difficulty Range (NOT affected by settings - always generate all)
+    all_difficulties = ["Easy", "Medium", "Hard"]
+    
+    # 2. Determine Bloom Level Range (NOT affected by settings - always generate all)
     bloom_hierarchy = ["Remember", "Understand", "Apply", "Analyze", "Evaluate", "Create"]
-    min_bloom = "Remember"
-    max_bloom = "Create"
-    allowed_bloom_levels = bloom_hierarchy[:]  # ✅ always defined
-    allowed_bloom_str = "'Remember', 'Understand', 'Apply', 'Analyze', 'Evaluate', 'Create'"
-
-    if quiz_id:
-        try:
-            settings = None
-            try:
-                settings = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
-            except AttributeError:
-                settings = db.query(QuizSettings).filter(QuizSettings.quizid == quiz_id).first()
-                
-            if settings:
-                min_bloom = getattr(settings, 'min_bloom_level', None) or "Remember"
-                max_bloom = getattr(settings, 'max_bloom_level', None) or "Create"
-                try:
-                    bloom_start_idx = bloom_hierarchy.index(min_bloom)
-                    bloom_end_idx = bloom_hierarchy.index(max_bloom)
-                    if bloom_start_idx > bloom_end_idx:
-                        bloom_start_idx, bloom_end_idx = bloom_end_idx, bloom_start_idx
-                    allowed_bloom_levels = bloom_hierarchy[bloom_start_idx : bloom_end_idx+1]
-                    allowed_bloom_str = ", ".join([f"'{x}'" for x in allowed_bloom_levels])
-                except (ValueError, AttributeError):
-                    allowed_bloom_levels = bloom_hierarchy[:]
-                    allowed_bloom_str = ", ".join([f"'{x}'" for x in allowed_bloom_levels])
-        except Exception as e:
-            print(f"Settings lookup error: {e}")
-            allowed_bloom_levels = bloom_hierarchy[:]
-            allowed_bloom_str = ", ".join([f"'{x}'" for x in allowed_bloom_levels])
-    else:
-        allowed_bloom_levels = bloom_hierarchy[:]
-        allowed_bloom_str = ", ".join([f"'{x}'" for x in allowed_bloom_levels])
-
+    
+    # ✅ GENERATION should ALWAYS create all Bloom levels and difficulties
+    # ✅ FILTERING happens later in student quiz start endpoint
+    generation_bloom_levels = bloom_hierarchy[:]
+    generation_bloom_str = ", ".join([f"'{x}'" for x in generation_bloom_levels])
+    
+    print(f"[MCQ GEN] Will generate across ALL Bloom levels: {generation_bloom_str}")
+    print(f"[MCQ GEN] Will generate across ALL difficulties: {all_difficulties}")
 
     # 3. Fetch KG Context (Robust Attribute Access)
     kg_entry = None
@@ -1036,7 +1011,7 @@ async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_
             KnowledgeGraph.graph_type == "master"  # Use the master merged graph
         ).first()
     except Exception as e:
-        print(f"KG Lookup Error: {e}")
+        print(f"[MCQ GEN] KG Lookup Error: {e}")
 
     selected_summary = ""
     selected_contents = ""
@@ -1052,92 +1027,118 @@ async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_
                     selected_summary = selected_node.get('summary', '')
                     selected_contents = selected_node.get('contents', selected_summary)
             else:
-                print("Warning: KG entry found but no node data.")
+                print("[MCQ GEN] Warning: KG entry found but no node data.")
                 
         except json.JSONDecodeError:
-            print("Error decoding KG JSON")
+            print("[MCQ GEN] Error decoding KG JSON")
         except Exception as e:
-            print(f"Error parsing KG nodes: {e}")
+            print(f"[MCQ GEN] Error parsing KG nodes: {e}")
 
-    # 4. ✅ Build Bloom Constraint Text
-    if min_bloom == max_bloom:
-        bloom_instruction = f"""
-        BLOOM'S TAXONOMY CONSTRAINT:
-        - Generate questions ONLY at the '{min_bloom}' cognitive level
-        - Do NOT create questions at other Bloom levels
-        """
-    else:
-        bloom_instruction = f"""
-        BLOOM'S TAXONOMY CONSTRAINT:
-        - Generate questions at these cognitive levels ONLY: {allowed_bloom_str}
-        - Bloom hierarchy: Remember < Understand < Apply < Analyze < Evaluate < Create
-        - Your questions must be between {min_bloom} and {max_bloom} (inclusive)
-        - Mix different levels within this range
-        """
+    # 4. ✅ Build Bloom Instruction (GENERATE ALL LEVELS - no constraints)
+    bloom_instruction = f"""
+    BLOOM'S TAXONOMY REQUIREMENT:
+    - Generate questions across ALL cognitive levels: {generation_bloom_str}
+    - Bloom hierarchy: Remember < Understand < Apply < Analyze < Evaluate < Create
+    - Create a DIVERSE mix of questions at different cognitive levels
+    - Include at least one question for each Bloom level if possible
+    - IMPORTANT: You MUST include the 'bloom_level' field for every question
+    """
 
     # 5. Prompt Generation
     prompt = f"""
-    As an expert computer science instructor, create relevant multiple-choice questions (MCQs) for the concept "{concept_id}".
+As an expert computer science instructor, create high-quality multiple-choice questions (MCQs) for the concept "{concept_id}".
 
-    TARGET DIFFICULTIES: {allowed_str}
+TARGET DIFFICULTIES: Generate questions at Easy, Medium, and Hard levels (mix them)
 
-    {bloom_instruction}
+{bloom_instruction}
 
-    STRICT RULES:
-    1. Questions must be stand-alone and not reference "the text" or "according to..."
-    2. Provide exactly 4 options per question.
-    3. Include 'difficulty' field with one of: {allowed_str}
-    4. Include 'bloom_level' field with one of: {allowed_bloom_str}
-    5. Respond ONLY as a valid JSON list (no markdown, no backticks).
+STRICT FORMATTING RULES:
+1. Questions must be stand-alone and not reference "the text" or "according to..."
+2. Provide exactly 4 options per question (as a list)
+3. REQUIRED: Include 'difficulty' field with one of: "Easy", "Medium", "Hard"
+4. REQUIRED: Include 'bloom_level' field with one of: {generation_bloom_str}
+5. Respond ONLY as a valid JSON array (no markdown, no backticks, no code blocks)
 
-    Response Format:
-    [
-    {{
-        "question": "What is the time complexity of binary search?",
-        "options": ["O(1)", "O(log n)", "O(n)", "O(n²)"],
-        "answer": "O(log n)",
-        "difficulty": "Medium",
-        "bloom_level": "Remember"
-    }}
-    ]
+Response Format (EXACT JSON):
+[
+  {{
+    "question": "What is the time complexity of binary search?",
+    "options": ["O(1)", "O(log n)", "O(n)", "O(n²)"],
+    "answer": "O(log n)",
+    "difficulty": "Medium",
+    "bloom_level": "Remember"
+  }},
+  {{
+    "question": "How would you modify binary search to find the first occurrence of a duplicate element?",
+    "options": ["Continue searching left after finding target", "Return immediately", "Use linear search", "Sort the array first"],
+    "answer": "Continue searching left after finding target",
+    "difficulty": "Hard",
+    "bloom_level": "Apply"
+  }}
+]
 
-    --- CONTEXT ---
-    Summary: {selected_summary[:800] if selected_summary else "No summary available."}
-    Details: {selected_contents[:1200] if selected_contents else "No additional details."}
-    """
+--- CONCEPT CONTEXT ---
+Summary: {selected_summary[:800] if selected_summary else "No summary available."}
+Details: {selected_contents[:1200] if selected_contents else "No additional details."}
+
+Generate 5-7 diverse questions covering different Bloom levels and difficulties.
+"""
 
     try:
         model = genai.GenerativeModel('models/gemini-2.5-flash')
         response = model.generate_content(prompt)
         model_output = getattr(response, 'text', str(response))
+        
+        print(f"[MCQ GEN] Raw LLM output length: {len(model_output)}")
+        
         mcqs = extract_mcqs_from_response(model_output)
+        
+        print(f"[MCQ GEN] Extracted {len(mcqs)} raw MCQs from response")
 
         out = []
         
-        for item in mcqs:
+        for idx, item in enumerate(mcqs):
             if isinstance(item, dict) and 'question' in item and 'options' in item and 'answer' in item:
-                # ✅ Validate and fix difficulty
-                if 'difficulty' not in item or item['difficulty'] not in allowed_difficulties:
-                    item['difficulty'] = random.choice(allowed_difficulties)
                 
-                # ✅ Validate and fix Bloom level
-                if 'bloom_level' not in item or item['bloom_level'] not in allowed_bloom_levels:
-                    item['bloom_level'] = random.choice(allowed_bloom_levels)
+                # ✅ Ensure difficulty exists and is valid
+                if 'difficulty' not in item or item['difficulty'] not in all_difficulties:
+                    item['difficulty'] = random.choice(all_difficulties)
+                    print(f"[MCQ GEN] MCQ {idx}: Set default difficulty -> {item['difficulty']}")
+                
+                # ✅ Ensure bloom_level exists and is valid
+                if 'bloom_level' not in item or item['bloom_level'] not in bloom_hierarchy:
+                    item['bloom_level'] = random.choice(bloom_hierarchy)
+                    print(f"[MCQ GEN] MCQ {idx}: Set default bloom_level -> {item['bloom_level']}")
+                else:
+                    print(f"[MCQ GEN] MCQ {idx}: bloom_level = {item['bloom_level']}, difficulty = {item['difficulty']}")
                 
                 # Check for hallucinations (questions that reference "the text")
                 q_text = item['question'].lower()
-                if any(phrase in q_text for phrase in ["provided text", "according to", "the text states", "in the passage"]):
-                    print(f"Skipping hallucinated question: {item['question'][:50]}...")
+                if any(phrase in q_text for phrase in ["provided text", "according to", "the text states", "in the passage", "based on the passage"]):
+                    print(f"[MCQ GEN] Skipping hallucinated question: {item['question'][:60]}...")
                     continue
 
+                # ✅ Attach concept_id
                 item['concept_id'] = concept_id
                 out.append(item)
+            else:
+                print(f"[MCQ GEN] Skipping malformed MCQ at index {idx}: {item}")
         
-        print(f"Generated {len(out)} MCQs with Bloom levels: {allowed_bloom_str}")
+        # ✅ Log distribution
+        bloom_distribution = {}
+        difficulty_distribution = {}
+        for mcq in out:
+            bloom_distribution[mcq['bloom_level']] = bloom_distribution.get(mcq['bloom_level'], 0) + 1
+            difficulty_distribution[mcq['difficulty']] = difficulty_distribution.get(mcq['difficulty'], 0) + 1
+        
+        print(f"[MCQ GEN] ✅ Generated {len(out)} valid MCQs")
+        print(f"[MCQ GEN] Bloom distribution: {bloom_distribution}")
+        print(f"[MCQ GEN] Difficulty distribution: {difficulty_distribution}")
+        
         return {"mcqs": out}
 
     except Exception as ex:
-        print(f"MCQ GENERATION ERROR: {ex}")
+        print(f"[MCQ GEN] ❌ GENERATION ERROR: {ex}")
         traceback.print_exc()
         return {"mcqs": []}
 
@@ -2040,24 +2041,35 @@ async def start_student_quiz(
     except ValueError:
         allowed_blooms = set(BLOOM_LEVELS)
 
+    print(f"[STUDENT QUIZ] Settings: max_q={max_q}, diff={raw_min}-{raw_max}, bloom={raw_min_bloom}-{raw_max_bloom}")
+    print(f"[STUDENT QUIZ] Allowed blooms: {allowed_blooms}")
+
     def get_filtered_mcqs():
         all_mcqs = db.query(MCQ).filter(MCQ.quiz_id == quiz_id).all()
         valid = []
+        
+        print(f"[FILTER] Total MCQs in quiz: {len(all_mcqs)}")
+        
         for m in all_mcqs:
-            # Difficulty
-            q_diff_str = m.difficulty if m.difficulty else "Medium"
+            # Difficulty filter
+            q_diff_str = (m.difficulty or "Medium").strip()
             q_val = DIFF_LEVELS.get(q_diff_str.lower(), 2)
+            
             if not (min_diff_val <= q_val <= max_diff_val):
+                print(f"[FILTER] Rejected MCQ {m.id[:8]} - difficulty {q_diff_str} outside range")
                 continue
 
-            # Bloom (MCQ.bloom_level field)
-            q_bloom = (getattr(m, "bloom_level", None) or "Remember")
+            # Bloom filter
+            q_bloom = (m.bloom_level or "Remember").strip()
             if q_bloom not in allowed_blooms:
+                print(f"[FILTER] Rejected MCQ {m.id[:8]} - bloom {q_bloom} not in {allowed_blooms}")
                 continue
 
+            print(f"[FILTER] ✅ Accepted MCQ {m.id[:8]} - {q_diff_str}, {q_bloom}")
             valid.append(m)
+        
+        print(f"[FILTER] Final count: {len(valid)}/{len(all_mcqs)} MCQs passed filters")
         return valid, all_mcqs
-
 
     # 2. Find existing attempts for this student+quiz
     attempts_q = db.query(QuizAttempt).filter(
@@ -2093,7 +2105,8 @@ async def start_student_quiz(
                     "id": m.id,
                     "question": m.question,
                     "options": m.options,
-                    "difficulty": m.difficulty
+                    "difficulty": m.difficulty,
+                    "bloom_level": m.bloom_level
                 } for m in selected_mcqs
             ],
             "settings": {
@@ -2103,7 +2116,7 @@ async def start_student_quiz(
             "retries_left": max(0, allowed_retries - completed_attempts)
         }
 
-    # 4. Enforce retry limit (only completed attempts count)
+    # 4. Enforce retry limit
     if completed_attempts >= allowed_retries:
         raise HTTPException(status_code=403, detail="No retries remaining")
 
@@ -2115,11 +2128,14 @@ async def start_student_quiz(
         return {
             "attempt_id": "error",
             "questions": [],
-            "settings": {},
+            "settings": {"feedback_style": feedback_style, "max_questions": max_q},
             "retries_left": max(0, allowed_retries - completed_attempts)
         }
 
+    # ✅ Apply max_questions limit AFTER filtering
     selected_mcqs = random.sample(target_pool, min(len(target_pool), max_q))
+    
+    print(f"[STUDENT QUIZ] Serving {len(selected_mcqs)} questions to student")
 
     attempt_id = str(uuid.uuid4())
     new_attempt = QuizAttempt(
@@ -2140,7 +2156,8 @@ async def start_student_quiz(
                 "id": m.id,
                 "question": m.question,
                 "options": m.options,
-                "difficulty": m.difficulty
+                "difficulty": m.difficulty,
+                "bloom_level": m.bloom_level
             } for m in selected_mcqs
         ],
         "settings": {
@@ -2149,6 +2166,7 @@ async def start_student_quiz(
         },
         "retries_left": max(0, allowed_retries - completed_attempts)
     }
+
 
 
 @app.put("/api/mcq/{mcq_id}")
@@ -2285,7 +2303,12 @@ async def submit_quiz_attempt(payload: dict = Body(...), db: Session = Depends(g
 
 @app.get("/api/quiz/{quiz_id}/questions")
 def get_quiz_questions_unfiltered(quiz_id: str, db: Session = Depends(get_db)):
+    """
+    ✅ Returns ALL MCQs regardless of settings (for instructor question bank)
+    """
     mcqs = db.query(MCQ).filter(MCQ.quiz_id == quiz_id).all()
+    print(f"[QUESTION BANK] Returning {len(mcqs)} unfiltered MCQs for quiz {quiz_id}")
+    
     return [
         {
             "id": m.id,
@@ -2295,6 +2318,7 @@ def get_quiz_questions_unfiltered(quiz_id: str, db: Session = Depends(get_db)):
             "bloom_level": m.bloom_level or "Remember"
         } for m in mcqs
     ]
+
 
 # ✅ Add endpoint to get live quiz stats for instructor
 @app.get("/api/quiz/{quiz_id}/live-stats")
