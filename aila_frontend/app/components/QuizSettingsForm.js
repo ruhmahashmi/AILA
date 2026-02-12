@@ -5,12 +5,15 @@ import { useState, useEffect } from "react";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
 
+// ✅ Bloom level ordering
+const BLOOM_LEVELS = ["Remember", "Understand", "Apply", "Analyze", "Evaluate", "Create"];
+
 export default function QuizSettingsForm({ quizId, week }) {
-  // 1. Initialize State with sensible DEFAULTS (matches backend)
-  // This prevents the "none" or empty state while loading.
   const [settings, setSettings] = useState({
     mindifficulty: "Easy",
     maxdifficulty: "Hard",
+    min_bloom_level: "Remember",  // ✅ Add
+    max_bloom_level: "Create",    // ✅ Add
     maxquestions: 10,
     allowedretries: 3,
     feedbackstyle: "Immediate",
@@ -21,7 +24,6 @@ export default function QuizSettingsForm({ quizId, week }) {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState(null);
 
-  // 2. Fetch settings when the component mounts or quizId changes
   useEffect(() => {
     let active = true;
 
@@ -32,11 +34,12 @@ export default function QuizSettingsForm({ quizId, week }) {
         const res = await fetch(`${BACKEND_URL}/api/quiz/settings/${quizId}`);
         if (res.ok) {
           const data = await res.json();
-          // Only update state if the component is still mounted
           if (active && data) {
             setSettings({
               mindifficulty: data.mindifficulty || "Easy",
               maxdifficulty: data.maxdifficulty || "Hard",
+              min_bloom_level: data.min_bloom_level || "Remember",  // ✅ Add
+              max_bloom_level: data.max_bloom_level || "Create",    // ✅ Add
               maxquestions: data.maxquestions ?? 10,
               allowedretries: data.allowedretries ?? 3,
               feedbackstyle: data.feedbackstyle || "Immediate",
@@ -55,7 +58,6 @@ export default function QuizSettingsForm({ quizId, week }) {
     return () => { active = false; };
   }, [quizId]);
 
-  // 3. Handle Save
   async function handleSave() {
     setSaving(true);
     setMessage(null);
@@ -65,6 +67,8 @@ export default function QuizSettingsForm({ quizId, week }) {
         week: parseInt(week, 10),
         mindifficulty: settings.mindifficulty,
         maxdifficulty: settings.maxdifficulty,
+        min_bloom_level: settings.min_bloom_level,  // ✅ Add
+        max_bloom_level: settings.max_bloom_level,  // ✅ Add
         maxquestions: parseInt(settings.maxquestions, 10),
         allowedretries: parseInt(settings.allowedretries, 10),
         feedbackstyle: settings.feedbackstyle,
@@ -72,7 +76,7 @@ export default function QuizSettingsForm({ quizId, week }) {
       };
 
       const res = await fetch(`${BACKEND_URL}/api/quiz/settings/${quizId}`, {
-        method: "POST", // Using POST for Upsert (Create or Update)
+        method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
       });
@@ -81,20 +85,16 @@ export default function QuizSettingsForm({ quizId, week }) {
       
       const savedData = await res.json();
       setMessage({ type: "success", text: "Settings saved!" });
-      
-      // Update local state to match exactly what server returned
       setSettings(prev => ({ ...prev, ...savedData }));
 
     } catch (e) {
       setMessage({ type: "error", text: "Error saving settings." });
     } finally {
       setSaving(false);
-      // Clear message after 3 seconds
       setTimeout(() => setMessage(null), 3000);
     }
   }
 
-  // --- RENDER ---
   return (
     <div className="bg-white p-4 rounded-lg border border-gray-200 shadow-sm">
       <h3 className="text-sm font-bold text-gray-800 uppercase tracking-wide mb-4 border-b pb-2">
@@ -126,6 +126,33 @@ export default function QuizSettingsForm({ quizId, week }) {
             <option value="Easy">Easy</option>
             <option value="Medium">Medium</option>
             <option value="Hard">Hard</option>
+          </select>
+        </div>
+
+        {/* ✅ Bloom Level Range */}
+        <div>
+          <label className="block text-xs font-semibold text-gray-500 mb-1">Min Bloom level</label>
+          <select 
+            className="w-full text-sm border-gray-300 rounded-md shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+            value={settings.min_bloom_level}
+            onChange={(e) => setSettings({...settings, min_bloom_level: e.target.value})}
+          >
+            {BLOOM_LEVELS.map(level => (
+              <option key={level} value={level}>{level}</option>
+            ))}
+          </select>
+        </div>
+
+        <div>
+          <label className="block text-xs font-semibold text-gray-500 mb-1">Max Bloom level</label>
+          <select 
+            className="w-full text-sm border-gray-300 rounded-md shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+            value={settings.max_bloom_level}
+            onChange={(e) => setSettings({...settings, max_bloom_level: e.target.value})}
+          >
+            {BLOOM_LEVELS.map(level => (
+              <option key={level} value={level}>{level}</option>
+            ))}
           </select>
         </div>
 

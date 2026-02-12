@@ -111,17 +111,32 @@ class QuizCreate(BaseModel):
 
 class QuizSettingsIn(BaseModel):
     week: int
-    min_difficulty: Optional[str] = None
-    max_difficulty: Optional[str] = None
-    max_questions: Optional[int] = None
-    allowed_retries: Optional[int] = None
-    feedback_style: Optional[str] = None
+    min_difficulty: str = "Easy"
+    max_difficulty: str = "Hard"
+    min_bloom_level: str = "Remember"  
+    max_bloom_level: str = "Create"    
+    max_questions: int = 10
+    allowed_retries: int = 3
+    feedback_style: str = "Immediate"
     include_spaced: bool = False
 
 
-class QuizSettingsOut(QuizSettingsIn):
+class QuizSettingsOut(BaseModel):
     id: int
     quiz_id: str
+    quizid: str
+    week: int
+    mindifficulty: str
+    maxdifficulty: str
+    min_bloom_level: str  
+    max_bloom_level: str  
+    maxquestions: int
+    allowedretries: int
+    feedbackstyle: str
+    includespaced: bool
+
+    class Config:
+        from_attributes = True
 
 
 class QuizStartResponse(BaseModel):
@@ -961,9 +976,17 @@ async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_
     week = payload.get("week")
     concept_id = payload.get("concept_id") or payload.get("segment_id")
     quiz_id = payload.get("quiz_id")
-
+    
     # 1. Determine Difficulty Range
+    allowed_difficulties = ["Easy", "Medium", "Hard"]
     allowed_str = "'Easy', 'Medium', 'Hard'"
+    
+    # 2. Determine Bloom Level Range
+    bloom_hierarchy = ["Remember", "Understand", "Apply", "Analyze", "Evaluate", "Create"]
+    min_bloom = "Remember"
+    max_bloom = "Create"
+    allowed_bloom_str = "'Remember', 'Understand', 'Apply', 'Analyze', 'Evaluate', 'Create'"
+    
     if quiz_id:
         try:
             settings = None
@@ -973,21 +996,39 @@ async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_
                 settings = db.query(QuizSettings).filter(QuizSettings.quizid == quiz_id).first()
                 
             if settings:
-                all_levels = ["Easy", "Medium", "Hard"]
+                # Handle Difficulty Range
                 mind = settings.min_difficulty or "Easy"
                 maxd = settings.max_difficulty or "Hard"
                 try:
-                    start_idx = all_levels.index(mind)
-                    end_idx = all_levels.index(maxd)
+                    start_idx = allowed_difficulties.index(mind)
+                    end_idx = allowed_difficulties.index(maxd)
                     if start_idx > end_idx: 
                         start_idx, end_idx = end_idx, start_idx
-                    allowed_str = ", ".join([f"'{x}'" for x in all_levels[start_idx : end_idx+1]])
+                    allowed_difficulties = allowed_difficulties[start_idx : end_idx+1]
+                    allowed_str = ", ".join([f"'{x}'" for x in allowed_difficulties])
                 except ValueError:
-                    pass 
-        except Exception:
-            pass
+                    pass
+                
+                # ✅ Handle Bloom Level Range
+                min_bloom = getattr(settings, 'min_bloom_level', None) or "Remember"
+                max_bloom = getattr(settings, 'max_bloom_level', None) or "Create"
+                try:
+                    bloom_start_idx = bloom_hierarchy.index(min_bloom)
+                    bloom_end_idx = bloom_hierarchy.index(max_bloom)
+                    if bloom_start_idx > bloom_end_idx:
+                        bloom_start_idx, bloom_end_idx = bloom_end_idx, bloom_start_idx
+                    allowed_bloom_levels = bloom_hierarchy[bloom_start_idx : bloom_end_idx+1]
+                    allowed_bloom_str = ", ".join([f"'{x}'" for x in allowed_bloom_levels])
+                except (ValueError, AttributeError):
+                    allowed_bloom_levels = bloom_hierarchy
+                    
+        except Exception as e:
+            print(f"Settings lookup error: {e}")
+            allowed_bloom_levels = bloom_hierarchy
+    else:
+        allowed_bloom_levels = bloom_hierarchy
 
-    # 2. Fetch KG Context (Robust Attribute Access)
+    # 3. Fetch KG Context (Robust Attribute Access)
     kg_entry = None
     try:
         kg_entry = db.query(KnowledgeGraph).filter(
@@ -1019,37 +1060,52 @@ async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_
         except Exception as e:
             print(f"Error parsing KG nodes: {e}")
 
-    # 3. Prompt Generation (ALWAYS define prompt, even if no KG data)
+    # 4. ✅ Build Bloom Constraint Text
+    if min_bloom == max_bloom:
+        bloom_instruction = f"""
+BLOOM'S TAXONOMY CONSTRAINT:
+- Generate questions ONLY at the '{min_bloom}' cognitive level
+- Do NOT create questions at other Bloom levels
+"""
+    else:
+        bloom_instruction = f"""
+BLOOM'S TAXONOMY CONSTRAINT:
+- Generate questions at these cognitive levels ONLY: {allowed_bloom_str}
+- Bloom hierarchy: Remember < Understand < Apply < Analyze < Evaluate < Create
+- Your questions must be between {min_bloom} and {max_bloom} (inclusive)
+- Mix different levels within this range
+"""
+
+    # 5. Prompt Generation
     prompt = f"""
-    As an expert computer science instructor, create relevant multiple-choice questions (MCQs) for the concept "{concept_id}".
+As an expert computer science instructor, create relevant multiple-choice questions (MCQs) for the concept "{concept_id}".
 
-    TARGET DIFFICULTIES: {allowed_str}
+TARGET DIFFICULTIES: {allowed_str}
 
-    BLOOM'S LEVELS (Mix these):
-    - Remember, Understand, Apply, Analyze
+{bloom_instruction}
 
-    STRICT RULES:
-    1. Questions must be stand-alone.
-    2. Provide exactly 4 options per question.
-    3. Include 'difficulty' (Easy/Medium/Hard).
-    4. Include 'bloom_level' (Remember/Understand/Apply/Analyze).
-    5. Respond ONLY as a JSON list.
+STRICT RULES:
+1. Questions must be stand-alone and not reference "the text" or "according to..."
+2. Provide exactly 4 options per question.
+3. Include 'difficulty' field with one of: {allowed_str}
+4. Include 'bloom_level' field with one of: {allowed_bloom_str}
+5. Respond ONLY as a valid JSON list (no markdown, no backticks).
 
-    Response Format:
-    [
-    {{
-        "question": "...",
-        "options": ["A", "B", "C", "D"],
-        "answer": "Option Text",
-        "difficulty": "Medium",
-        "bloom_level": "Apply"
-    }}
-    ]
+Response Format:
+[
+  {{
+    "question": "What is the time complexity of binary search?",
+    "options": ["O(1)", "O(log n)", "O(n)", "O(n²)"],
+    "answer": "O(log n)",
+    "difficulty": "Medium",
+    "bloom_level": "Remember"
+  }}
+]
 
-    --- CONTEXT ---
-    Summary: {selected_summary[:800] if selected_summary else "No summary available."}
-    Details: {selected_contents[:1200] if selected_contents else "No additional details."}
-    """
+--- CONTEXT ---
+Summary: {selected_summary[:800] if selected_summary else "No summary available."}
+Details: {selected_contents[:1200] if selected_contents else "No additional details."}
+"""
 
     try:
         model = genai.GenerativeModel('models/gemini-2.5-flash')
@@ -1058,27 +1114,34 @@ async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_
         mcqs = extract_mcqs_from_response(model_output)
 
         out = []
-        valid_difficulties = [d.strip("' ") for d in allowed_str.split(",")]
         
         for item in mcqs:
             if isinstance(item, dict) and 'question' in item and 'options' in item and 'answer' in item:
-                if 'difficulty' not in item or item['difficulty'] not in valid_difficulties:
-                    item['difficulty'] = random.choice(valid_difficulties)
+                # ✅ Validate and fix difficulty
+                if 'difficulty' not in item or item['difficulty'] not in allowed_difficulties:
+                    item['difficulty'] = random.choice(allowed_difficulties)
                 
-                # Check for hallucinations
+                # ✅ Validate and fix Bloom level
+                if 'bloom_level' not in item or item['bloom_level'] not in allowed_bloom_levels:
+                    item['bloom_level'] = random.choice(allowed_bloom_levels)
+                
+                # Check for hallucinations (questions that reference "the text")
                 q_text = item['question'].lower()
-                if "provided text" in q_text or "according to" in q_text:
+                if any(phrase in q_text for phrase in ["provided text", "according to", "the text states", "in the passage"]):
+                    print(f"Skipping hallucinated question: {item['question'][:50]}...")
                     continue
 
                 item['concept_id'] = concept_id
                 out.append(item)
         
+        print(f"Generated {len(out)} MCQs with Bloom levels: {allowed_bloom_str}")
         return {"mcqs": out}
 
     except Exception as ex:
         print(f"MCQ GENERATION ERROR: {ex}")
         traceback.print_exc()
         return {"mcqs": []}
+
 
 
 
@@ -1570,14 +1633,12 @@ async def delete_upload(uploadid: str = Form(...), db: Session = Depends(get_db)
 
 @app.get("/api/quiz/settings/{quiz_id}", response_model=QuizSettingsOut)
 async def get_quiz_settings(quiz_id: str, db: Session = Depends(get_db)):
-    # 1. Fetch from DB
     qs = None
     try:
         qs = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
     except AttributeError:
         qs = db.query(QuizSettings).filter(QuizSettings.quizid == quiz_id).first()
     
-    # 2. Defaults if not found
     if not qs:
         quiz = db.query(Quiz).filter(Quiz.id == quiz_id).first()
         default_week = quiz.week if quiz else 1
@@ -1588,37 +1649,30 @@ async def get_quiz_settings(quiz_id: str, db: Session = Depends(get_db)):
             "week": default_week,
             "mindifficulty": "Easy",
             "maxdifficulty": "Hard",
+            "min_bloom_level": "Remember", 
+            "max_bloom_level": "Create",    
             "maxquestions": 10,
             "allowedretries": 3,
             "feedbackstyle": "Immediate",
             "includespaced": False
         }
 
-    # 3. Safe Attribute Access (Handle underscore vs no underscore)
-    def get_attr(obj, name, default=None):
-        return getattr(obj, name, getattr(obj, name.replace("_", ""), getattr(obj, name.replace("min", "min_").replace("max", "max_"), default)))
-
-    # Get values safely
-    q_id_val = get_attr(qs, 'quiz_id', getattr(qs, 'quizid', quiz_id))
-    min_d = get_attr(qs, 'mindifficulty')
-    max_d = get_attr(qs, 'maxdifficulty')
-    max_q = get_attr(qs, 'maxquestions')
-    retries = get_attr(qs, 'allowedretries')
-    style = get_attr(qs, 'feedbackstyle')
-    spaced = get_attr(qs, 'includespaced')
-
+    # Get existing values with safe attribute access
     return {
         "id": qs.id,
-        "quizid": q_id_val,
-        "quiz_id": q_id_val,
+        "quizid": getattr(qs, 'quiz_id', quiz_id),
+        "quiz_id": getattr(qs, 'quiz_id', quiz_id),
         "week": qs.week,
-        "mindifficulty": min_d,
-        "maxdifficulty": max_d,
-        "maxquestions": max_q,
-        "allowedretries": retries,
-        "feedbackstyle": style,
-        "includespaced": spaced
+        "mindifficulty": getattr(qs, 'min_difficulty', 'Easy'),
+        "maxdifficulty": getattr(qs, 'max_difficulty', 'Hard'),
+        "min_bloom_level": getattr(qs, 'min_bloom_level', 'Remember'),  
+        "max_bloom_level": getattr(qs, 'max_bloom_level', 'Create'),    
+        "maxquestions": getattr(qs, 'max_questions', 10),
+        "allowedretries": getattr(qs, 'allowed_retries', 3),
+        "feedbackstyle": getattr(qs, 'feedback_style', 'Immediate'),
+        "includespaced": getattr(qs, 'include_spaced', False)
     }
+
 
 @app.post("/api/quiz/settings/{quiz_id}", response_model=QuizSettingsOut)
 async def upsert_quiz_settings(quiz_id: str, payload: QuizSettingsIn, db: Session = Depends(get_db)):
@@ -1628,8 +1682,10 @@ async def upsert_quiz_settings(quiz_id: str, payload: QuizSettingsIn, db: Sessio
         qs = QuizSettings(
             quiz_id=quiz_id,
             week=payload.week,
-            min_difficulty=payload.min_difficulty, # Matches model
+            min_difficulty=payload.min_difficulty,
             max_difficulty=payload.max_difficulty,
+            min_bloom_level=payload.min_bloom_level,
+            max_bloom_level=payload.max_bloom_level,
             max_questions=payload.max_questions,
             allowed_retries=payload.allowed_retries,
             feedback_style=payload.feedback_style,
@@ -1640,6 +1696,8 @@ async def upsert_quiz_settings(quiz_id: str, payload: QuizSettingsIn, db: Sessio
         qs.week = payload.week
         qs.min_difficulty = payload.min_difficulty
         qs.max_difficulty = payload.max_difficulty
+        qs.min_bloom_level = payload.min_bloom_level
+        qs.max_bloom_level = payload.max_bloom_level
         qs.max_questions = payload.max_questions
         qs.allowed_retries = payload.allowed_retries
         qs.feedback_style = payload.feedback_style
@@ -1647,7 +1705,24 @@ async def upsert_quiz_settings(quiz_id: str, payload: QuizSettingsIn, db: Sessio
         
     db.commit()
     db.refresh(qs)
-    return qs
+    
+    # ✅ Return properly formatted dict
+    return {
+        "id": qs.id,
+        "quiz_id": qs.quiz_id,
+        "quizid": qs.quiz_id,
+        "week": qs.week,
+        "mindifficulty": qs.min_difficulty,
+        "maxdifficulty": qs.max_difficulty,
+        "min_bloom_level": qs.min_bloom_level,
+        "max_bloom_level": qs.max_bloom_level,
+        "maxquestions": qs.max_questions,
+        "allowedretries": qs.allowed_retries,
+        "feedbackstyle": qs.feedback_style,
+        "includespaced": qs.include_spaced
+    }
+
+
 
 
 @app.get("/api/quiz/questions/{quiz_id}")

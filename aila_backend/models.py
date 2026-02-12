@@ -151,10 +151,14 @@ class QuizSettings(Base):
 
     min_difficulty = Column(String, default="Easy")
     max_difficulty = Column(String, default="Hard")
+    min_bloom_level = Column(String, default="Remember")  
+    max_bloom_level = Column(String, default="Create")    
     max_questions = Column(Integer, default=10)
     allowed_retries = Column(Integer, default=3)
     feedback_style = Column(String, default="Immediate")
     include_spaced = Column(Boolean, default=False)
+
+
 
 
 class QuizAttempt(Base):
