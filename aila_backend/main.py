@@ -2530,3 +2530,293 @@ async def generate_knowledge_graph(course_id: str, week: int, processing_id: str
             upload_record.status = "error"
             upload_record.error_message = str(e)
             db.commit()
+
+# ===== STUDENT PERFORMANCE + INSTRUCTOR FEEDBACK ENDPOINTS =====
+
+
+# ---------------------------------------------------------------------------
+# ENDPOINT 1: GET /api/student/performance
+# ---------------------------------------------------------------------------
+
+@app.get("/api/student/performance")
+def get_student_performance(student_id: str, course_id: str, db: Session = Depends(get_db)):
+    # Fetch all completed attempts for this student in the given course
+    attempts = (
+        db.query(QuizAttempt)
+        .join(Quiz, Quiz.id == QuizAttempt.quiz_id)
+        .filter(
+            QuizAttempt.student_id == student_id,
+            QuizAttempt.completed == True,
+            Quiz.course_id == course_id,
+        )
+        .order_by(QuizAttempt.started_at.desc())
+        .all()
+    )
+
+    total_attempts = len(attempts)
+    overall_score_pct = 0.0
+    quiz_history = []
+
+    bloom_levels = ["Remember", "Understand", "Apply", "Analyze", "Evaluate", "Create"]
+    bloom_breakdown = {lvl: {"correct": 0, "total": 0, "pct": 0.0} for lvl in bloom_levels}
+    concept_map = {}  # concept_id -> {"correct": int, "total": int}
+
+    score_pcts = []
+
+    for attempt in attempts:
+        quiz = db.query(Quiz).filter(Quiz.id == attempt.quiz_id).first()
+        quiz_name = quiz.title if quiz and hasattr(quiz, "title") else str(attempt.quiz_id)
+
+        total = attempt.total_questions if attempt.total_questions else 0
+        score = attempt.score if attempt.score is not None else 0
+        pct = round((score / total * 100), 2) if total > 0 else 0.0
+        score_pcts.append(pct)
+
+        # Derive week number from started_at
+        week_num = None
+        if attempt.started_at:
+            week_num = attempt.started_at.isocalendar()[1]
+
+        quiz_history.append({
+            "attempt_id": str(attempt.id),
+            "quiz_id": str(attempt.quiz_id),
+            "quiz_name": quiz_name,
+            "score": score,
+            "total": total,
+            "score_pct": pct,
+            "completed_at": attempt.started_at.isoformat() if attempt.started_at else None,
+            "week": week_num,
+        })
+
+        # Aggregate bloom and concept data from MCQResponses
+        responses = (
+            db.query(MCQResponse)
+            .filter(MCQResponse.attempt_id == attempt.id)
+            .all()
+        )
+
+        for resp in responses:
+            mcq = db.query(MCQ).filter(MCQ.id == resp.mcq_id).first()
+            if not mcq:
+                continue
+
+            bloom = mcq.bloom_level
+            concept = str(mcq.concept_id) if mcq.concept_id else "unknown"
+
+            if bloom in bloom_breakdown:
+                bloom_breakdown[bloom]["total"] += 1
+                if resp.is_correct:
+                    bloom_breakdown[bloom]["correct"] += 1
+
+            if concept not in concept_map:
+                concept_map[concept] = {"correct": 0, "total": 0}
+            concept_map[concept]["total"] += 1
+            if resp.is_correct:
+                concept_map[concept]["correct"] += 1
+
+    # Compute overall score pct
+    if score_pcts:
+        overall_score_pct = round(sum(score_pcts) / len(score_pcts), 2)
+
+    # Finalise bloom breakdown percentages
+    for lvl in bloom_levels:
+        t = bloom_breakdown[lvl]["total"]
+        c = bloom_breakdown[lvl]["correct"]
+        bloom_breakdown[lvl]["pct"] = round((c / t * 100), 2) if t > 0 else 0.0
+
+    # Build concept mastery list
+    concept_mastery = []
+    for concept_id, data in concept_map.items():
+        t = data["total"]
+        c = data["correct"]
+        pct = round((c / t * 100), 2) if t > 0 else 0.0
+        if pct >= 80:
+            status = "mastered"
+        elif pct >= 50:
+            status = "learning"
+        else:
+            status = "struggling"
+        concept_mastery.append({
+            "concept_id": concept_id,
+            "correct": c,
+            "total": t,
+            "pct": pct,
+            "status": status,
+        })
+
+    # Sort weakest first
+    concept_mastery.sort(key=lambda x: x["pct"])
+
+    return {
+        "total_attempts": total_attempts,
+        "overall_score_pct": overall_score_pct,
+        "quiz_history": quiz_history,
+        "bloom_breakdown": bloom_breakdown,
+        "concept_mastery": concept_mastery,
+    }
+
+
+# ---------------------------------------------------------------------------
+# ENDPOINT 2: GET /api/student/quiz/adaptive-bloom
+# ---------------------------------------------------------------------------
+
+@app.get("/api/student/quiz/adaptive-bloom")
+def get_adaptive_bloom(student_id: str, quiz_id: str, db: Session = Depends(get_db)):
+    bloom_levels = ["Remember", "Understand", "Apply", "Analyze", "Evaluate", "Create"]
+
+    # Fetch quiz settings
+    settings = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
+    min_bloom = settings.min_bloom_level if settings and settings.min_bloom_level else bloom_levels[0]
+    max_bloom = settings.max_bloom_level if settings and settings.max_bloom_level else bloom_levels[-1]
+
+    # Clamp allowed range
+    min_idx = bloom_levels.index(min_bloom) if min_bloom in bloom_levels else 0
+    max_idx = bloom_levels.index(max_bloom) if max_bloom in bloom_levels else len(bloom_levels) - 1
+    allowed_levels = bloom_levels[min_idx: max_idx + 1]
+
+    # Fetch all completed attempts for this student + quiz
+    attempts = (
+        db.query(QuizAttempt)
+        .filter(
+            QuizAttempt.student_id == student_id,
+            QuizAttempt.quiz_id == quiz_id,
+            QuizAttempt.completed == True,
+        )
+        .all()
+    )
+
+    # Aggregate per-bloom accuracy
+    bloom_performance = {lvl: {"correct": 0, "total": 0, "pct": 0.0} for lvl in bloom_levels}
+
+    for attempt in attempts:
+        responses = (
+            db.query(MCQResponse)
+            .filter(MCQResponse.attempt_id == attempt.id)
+            .all()
+        )
+        for resp in responses:
+            mcq = db.query(MCQ).filter(MCQ.id == resp.mcq_id).first()
+            if not mcq:
+                continue
+            bloom = mcq.bloom_level
+            if bloom in bloom_performance:
+                bloom_performance[bloom]["total"] += 1
+                if resp.is_correct:
+                    bloom_performance[bloom]["correct"] += 1
+
+    for lvl in bloom_levels:
+        t = bloom_performance[lvl]["total"]
+        c = bloom_performance[lvl]["correct"]
+        bloom_performance[lvl]["pct"] = round((c / t * 100), 2) if t > 0 else 0.0
+
+    # Determine recommended bloom level
+    recommended = None
+    for lvl in allowed_levels:
+        data = bloom_performance[lvl]
+        # Not tested yet OR accuracy below threshold
+        if data["total"] == 0 or data["pct"] < 75.0:
+            recommended = lvl
+            break
+
+    # If all levels are >= 75%, return the highest allowed level
+    if recommended is None:
+        recommended = allowed_levels[-1]
+
+    # Build message
+    recommended_idx = bloom_levels.index(recommended)
+    if recommended_idx > 0:
+        prev_level = bloom_levels[recommended_idx - 1]
+        message = f"Targeting {recommended} — keep practicing {prev_level}"
+    else:
+        message = f"Targeting {recommended} — great starting point!"
+
+    return {
+        "recommended_bloom_level": recommended,
+        "bloom_performance": bloom_performance,
+        "message": message,
+    }
+
+
+# ---------------------------------------------------------------------------
+# ENDPOINT 3: GET /api/instructor/quiz/feedback
+# ---------------------------------------------------------------------------
+
+@app.get("/api/instructor/quiz/feedback")
+def get_quiz_feedback(quiz_id: str, db: Session = Depends(get_db)):
+    quiz = db.query(Quiz).filter(Quiz.id == quiz_id).first()
+    if not quiz:
+        raise HTTPException(status_code=404, detail="Quiz not found")
+
+    quiz_name = quiz.title if hasattr(quiz, "title") else str(quiz_id)
+
+    # All attempts for this quiz
+    all_attempts = db.query(QuizAttempt).filter(QuizAttempt.quiz_id == quiz_id).all()
+    completed_attempts = [a for a in all_attempts if a.completed]
+
+    total_attempts = len(all_attempts)
+    completion_rate = round((len(completed_attempts) / total_attempts * 100), 2) if total_attempts > 0 else 0.0
+
+    # Avg score across completed attempts
+    score_pcts = []
+    student_scores = []
+    for attempt in completed_attempts:
+        total = attempt.total_questions if attempt.total_questions else 0
+        score = attempt.score if attempt.score is not None else 0
+        pct = round((score / total * 100), 2) if total > 0 else 0.0
+        score_pcts.append(pct)
+        student_scores.append({
+            "student_id": str(attempt.student_id),
+            "score": score,
+            "total": total,
+            "score_pct": pct,
+            "completed_at": attempt.started_at.isoformat() if attempt.started_at else None,
+        })
+
+    avg_score_pct = round(sum(score_pcts) / len(score_pcts), 2) if score_pcts else 0.0
+    student_scores.sort(key=lambda x: x["score_pct"], reverse=True)
+
+    # Per-question breakdown
+    mcqs = db.query(MCQ).filter(MCQ.quiz_id == quiz_id).all()
+    question_breakdown = []
+
+    for mcq in mcqs:
+        all_responses = (
+            db.query(MCQResponse)
+            .filter(MCQResponse.mcq_id == mcq.id)
+            .all()
+        )
+        total_answers = len(all_responses)
+        correct_count = sum(1 for r in all_responses if r.is_correct)
+        accuracy_pct = round((correct_count / total_answers * 100), 2) if total_answers > 0 else 0.0
+
+        # Most common wrong answer
+        wrong_answers = [r.selected_answer for r in all_responses if not r.is_correct and r.selected_answer]
+        most_common_wrong = None
+        if wrong_answers:
+            counter = Counter(wrong_answers)
+            most_common_wrong = counter.most_common(1)[0][0]
+
+        question_breakdown.append({
+            "mcq_id": str(mcq.id),
+            "question": mcq.question,
+            "bloom_level": mcq.bloom_level,
+            "difficulty": mcq.difficulty,
+            "concept_id": str(mcq.concept_id) if mcq.concept_id else None,
+            "total_answers": total_answers,
+            "correct_count": correct_count,
+            "accuracy_pct": accuracy_pct,
+            "most_common_wrong_answer": most_common_wrong,
+        })
+
+    # Sort hardest (lowest accuracy) first
+    question_breakdown.sort(key=lambda x: x["accuracy_pct"])
+
+    return {
+        "quiz_id": str(quiz_id),
+        "quiz_name": quiz_name,
+        "total_attempts": total_attempts,
+        "avg_score_pct": avg_score_pct,
+        "completion_rate": completion_rate,
+        "question_breakdown": question_breakdown,
+        "student_scores": student_scores,
+    }
