@@ -2003,6 +2003,7 @@ async def regenerate_single_mcq(mcq_id: str, db: Session = Depends(get_db)):
 async def start_student_quiz(
     quiz_id: str = Body(..., embed=True),
     student_id: str = Body(..., embed=True),
+    recommended_bloom_level: Optional[str] = Body(None, embed=True),
     db: Session = Depends(get_db)
 ):
     # 1. Fetch Quiz & Settings
@@ -2041,8 +2042,20 @@ async def start_student_quiz(
     except ValueError:
         allowed_blooms = set(BLOOM_LEVELS)
 
+    # --- Adaptive Bloom targeting ---
+    # If the frontend sent a recommended_bloom_level (from /api/student/quiz/adaptive-bloom),
+    # validate it falls within the instructor-set range and use it to bias selection.
+    adaptive_target_bloom = None
+    if recommended_bloom_level and recommended_bloom_level in BLOOM_LEVELS:
+        rec_idx = BLOOM_LEVELS.index(recommended_bloom_level)
+        bloom_start_idx = BLOOM_LEVELS.index(raw_min_bloom) if raw_min_bloom in BLOOM_LEVELS else 0
+        bloom_end_idx = BLOOM_LEVELS.index(raw_max_bloom) if raw_max_bloom in BLOOM_LEVELS else len(BLOOM_LEVELS) - 1
+        # Clamp to instructor-allowed range
+        clamped_idx = max(bloom_start_idx, min(rec_idx, bloom_end_idx))
+        adaptive_target_bloom = BLOOM_LEVELS[clamped_idx]
+
     print(f"[STUDENT QUIZ] Settings: max_q={max_q}, diff={raw_min}-{raw_max}, bloom={raw_min_bloom}-{raw_max_bloom}")
-    print(f"[STUDENT QUIZ] Allowed blooms: {allowed_blooms}")
+    print(f"[STUDENT QUIZ] Allowed blooms: {allowed_blooms}, adaptive_target: {adaptive_target_bloom}")
 
     def get_filtered_mcqs():
         all_mcqs = db.query(MCQ).filter(MCQ.quiz_id == quiz_id).all()
@@ -2096,7 +2109,20 @@ async def start_student_quiz(
                 "retries_left": max(0, allowed_retries - completed_attempts)
             }
 
-        selected_mcqs = random.sample(target_pool, min(len(target_pool), max_q))
+        if adaptive_target_bloom:
+            target_bloom_mcqs = [m for m in target_pool if (m.bloom_level or "Remember") == adaptive_target_bloom]
+            other_mcqs = [m for m in target_pool if (m.bloom_level or "Remember") != adaptive_target_bloom]
+            random.shuffle(target_bloom_mcqs)
+            random.shuffle(other_mcqs)
+            target_count = min(len(target_bloom_mcqs), max(1, int(max_q * 0.6)))
+            other_count = min(len(other_mcqs), max_q - target_count)
+            ordered_pool = target_bloom_mcqs[:target_count] + other_mcqs[:other_count]
+            if len(ordered_pool) < max_q:
+                remaining = [m for m in target_pool if m not in ordered_pool]
+                ordered_pool += remaining[:max_q - len(ordered_pool)]
+            selected_mcqs = ordered_pool[:max_q]
+        else:
+            selected_mcqs = random.sample(target_pool, min(len(target_pool), max_q))
 
         return {
             "attempt_id": active_attempt.id,
@@ -2132,8 +2158,26 @@ async def start_student_quiz(
             "retries_left": max(0, allowed_retries - completed_attempts)
         }
 
-    # ✅ Apply max_questions limit AFTER filtering
-    selected_mcqs = random.sample(target_pool, min(len(target_pool), max_q))
+    # ✅ Apply adaptive Bloom weighting BEFORE sampling
+    # If adaptive_target_bloom is set, front-load questions at that Bloom level,
+    # then fill remaining slots with other allowed levels.
+    if adaptive_target_bloom:
+        target_bloom_mcqs = [m for m in target_pool if (m.bloom_level or "Remember") == adaptive_target_bloom]
+        other_mcqs = [m for m in target_pool if (m.bloom_level or "Remember") != adaptive_target_bloom]
+        random.shuffle(target_bloom_mcqs)
+        random.shuffle(other_mcqs)
+        # Aim: ~60% from target bloom level, rest from others (if available)
+        target_count = min(len(target_bloom_mcqs), max(1, int(max_q * 0.6)))
+        other_count = min(len(other_mcqs), max_q - target_count)
+        ordered_pool = target_bloom_mcqs[:target_count] + other_mcqs[:other_count]
+        # If we still don't have enough, pad from whatever is left
+        if len(ordered_pool) < max_q:
+            remaining = [m for m in target_pool if m not in ordered_pool]
+            ordered_pool += remaining[:max_q - len(ordered_pool)]
+        selected_mcqs = ordered_pool[:max_q]
+        print(f"[ADAPTIVE] Targeting '{adaptive_target_bloom}': {target_count} target + {other_count} other = {len(selected_mcqs)} questions")
+    else:
+        selected_mcqs = random.sample(target_pool, min(len(target_pool), max_q))
     
     print(f"[STUDENT QUIZ] Serving {len(selected_mcqs)} questions to student")
 
