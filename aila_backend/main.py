@@ -11,12 +11,13 @@ from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, JSON
 from sqlalchemy.sql import func
 from sqlalchemy import Boolean
 from sqlalchemy import text as sql_text
+from sqlalchemy import or_
 
 from pydantic import BaseModel, Field
 from llama_index.llms.gemini import Gemini
 from pptx import Presentation
 from typing import List, Optional, Dict, Set
-from collections import deque, defaultdict
+from collections import deque, defaultdict, Counter
 from datetime import datetime
 
 import asyncio
@@ -2781,86 +2782,257 @@ def get_adaptive_bloom(student_id: str, quiz_id: str, db: Session = Depends(get_
     }
 
 
-# ---------------------------------------------------------------------------
-# ENDPOINT 3: GET /api/instructor/quiz/feedback
-# ---------------------------------------------------------------------------
+
+# ===== INSTRUCTOR ENROLLMENT MANAGEMENT + ANONYMOUS FEEDBACK =====
+
+# ── Endpoint 1: GET /api/users/students ──────────────────────────────────────
+
+@app.get("/api/users/students")
+def get_all_students(
+    search: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    query = db.query(User).filter(User.role == "student")
+
+    if search:
+        s = search.lower()
+        query = query.filter(
+            or_(
+                func.lower(User.email).contains(s),
+                func.lower(User.id).startswith(s),
+            )
+        )
+
+    students = query.limit(50).all()
+
+    return [
+        {
+            "id": u.id,
+            "email": u.email,
+            "truncated_id": u.id[:8],
+        }
+        for u in students
+    ]
+
+
+# ── Endpoint 2: GET /api/course/{course_id}/students ─────────────────────────
+
+@app.get("/api/course/{course_id}/students")
+def get_course_students(
+    course_id: str,
+    db: Session = Depends(get_db),
+):
+    rows = (
+        db.query(Enrollment, User)
+        .join(User, Enrollment.student_id == User.id)
+        .filter(Enrollment.course_id == course_id)
+        .all()
+    )
+
+    return [
+        {
+            "student_id": enrollment.student_id,
+            "email": user.email,
+            "enrolled_at": enrollment.enrolled_at.isoformat() if enrollment.enrolled_at else None,
+            "enrollment_id": enrollment.id,
+        }
+        for enrollment, user in rows
+    ]
+
+
+# ── Endpoint 3: POST /api/instructor/enroll ──────────────────────────────────
+
+@app.post("/api/instructor/enroll")
+def enroll_student(
+    body: dict = Body(...),
+    db: Session = Depends(get_db),
+):
+    course_id = body.get("course_id")
+    instructor_id = body.get("instructor_id")
+    identifier = body.get("identifier")
+
+    # 1. Verify instructor owns course
+    course = db.query(Course).filter(Course.id == course_id).first()
+    if not course or course.instructor_id != instructor_id:
+        raise HTTPException(status_code=403, detail="Not authorized for this course")
+
+    # 2. Look up student by UUID first, then by email
+    user = db.query(User).filter(User.id == identifier).first()
+    if not user:
+        user = db.query(User).filter(func.lower(User.email) == identifier.lower()).first()
+
+    # 3. No user found
+    if not user:
+        raise HTTPException(status_code=404, detail="No student found with that ID or email")
+
+    # 4. Must be a student account
+    if user.role != "student":
+        raise HTTPException(status_code=400, detail="That account is not a student")
+
+    # 5. Already enrolled?
+    existing = (
+        db.query(Enrollment)
+        .filter(Enrollment.course_id == course_id, Enrollment.student_id == user.id)
+        .first()
+    )
+    if existing:
+        raise HTTPException(status_code=409, detail="Student already enrolled")
+
+    # 6. Create enrollment
+    enrollment = Enrollment(
+        id=str(uuid.uuid4()),
+        course_id=course_id,
+        student_id=user.id,
+    )
+    db.add(enrollment)
+    db.commit()
+    db.refresh(enrollment)
+
+    return {
+        "status": "enrolled",
+        "student_id": user.id,
+        "email": user.email,
+        "enrollment_id": enrollment.id,
+    }
+
+
+# ── Endpoint 4: DELETE /api/instructor/unenroll ──────────────────────────────
+
+@app.delete("/api/instructor/unenroll")
+def unenroll_student(
+    body: dict = Body(...),
+    db: Session = Depends(get_db),
+):
+    course_id = body.get("course_id")
+    instructor_id = body.get("instructor_id")
+    student_id = body.get("student_id")
+
+    # 1. Verify instructor owns course
+    course = db.query(Course).filter(Course.id == course_id).first()
+    if not course or course.instructor_id != instructor_id:
+        raise HTTPException(status_code=403, detail="Not authorized for this course")
+
+    # 2. Find and delete enrollment
+    enrollment = (
+        db.query(Enrollment)
+        .filter(Enrollment.course_id == course_id, Enrollment.student_id == student_id)
+        .first()
+    )
+    if not enrollment:
+        raise HTTPException(status_code=404, detail="Enrollment not found")
+
+    db.delete(enrollment)
+    db.commit()
+
+    return {"status": "removed", "student_id": student_id}
+
+
+# ── Endpoint 5: GET /api/instructor/quiz/feedback (aggregate/anonymous) ──────
 
 @app.get("/api/instructor/quiz/feedback")
-def get_quiz_feedback(quiz_id: str, db: Session = Depends(get_db)):
+def get_quiz_feedback_aggregate(
+    quiz_id: str,
+    db: Session = Depends(get_db),
+):
     quiz = db.query(Quiz).filter(Quiz.id == quiz_id).first()
     if not quiz:
         raise HTTPException(status_code=404, detail="Quiz not found")
 
-    quiz_name = quiz.title if hasattr(quiz, "title") else str(quiz_id)
-
-    # All attempts for this quiz
     all_attempts = db.query(QuizAttempt).filter(QuizAttempt.quiz_id == quiz_id).all()
-    completed_attempts = [a for a in all_attempts if a.completed]
-
     total_attempts = len(all_attempts)
-    completion_rate = round((len(completed_attempts) / total_attempts * 100), 2) if total_attempts > 0 else 0.0
+    completed_attempts = [a for a in all_attempts if a.completed]
+    completed_count = len(completed_attempts)
 
-    # Avg score across completed attempts
-    score_pcts = []
-    student_scores = []
-    for attempt in completed_attempts:
-        total = attempt.total_questions if attempt.total_questions else 0
-        score = attempt.score if attempt.score is not None else 0
-        pct = round((score / total * 100), 2) if total > 0 else 0.0
-        score_pcts.append(pct)
-        student_scores.append({
-            "student_id": str(attempt.student_id),
-            "score": score,
-            "total": total,
-            "score_pct": pct,
-            "completed_at": attempt.started_at.isoformat() if attempt.started_at else None,
-        })
+    completion_rate = (completed_count / total_attempts * 100) if total_attempts > 0 else 0.0
 
-    avg_score_pct = round(sum(score_pcts) / len(score_pcts), 2) if score_pcts else 0.0
-    student_scores.sort(key=lambda x: x["score_pct"], reverse=True)
+    # Average score across completed attempts only
+    scores = [a.score_pct for a in completed_attempts if a.score_pct is not None]
+    avg_score_pct = (sum(scores) / len(scores)) if scores else 0.0
 
-    # Per-question breakdown
+    # Score distribution buckets
+    distribution = {"0-20": 0, "21-40": 0, "41-60": 0, "61-80": 0, "81-100": 0}
+    for s in scores:
+        if s <= 20:
+            distribution["0-20"] += 1
+        elif s <= 40:
+            distribution["21-40"] += 1
+        elif s <= 60:
+            distribution["41-60"] += 1
+        elif s <= 80:
+            distribution["61-80"] += 1
+        else:
+            distribution["81-100"] += 1
+
+    # Question-level breakdown
     mcqs = db.query(MCQ).filter(MCQ.quiz_id == quiz_id).all()
     question_breakdown = []
 
+    bloom_accumulator = {}  # bloom_level -> {"questions": int, "total_accuracy": float}
+
     for mcq in mcqs:
-        all_responses = (
+        responses = (
             db.query(MCQResponse)
-            .filter(MCQResponse.mcq_id == mcq.id)
+            .join(QuizAttempt, MCQResponse.attempt_id == QuizAttempt.id)
+            .filter(MCQResponse.mcq_id == mcq.id, QuizAttempt.completed == True)
             .all()
         )
-        total_answers = len(all_responses)
-        correct_count = sum(1 for r in all_responses if r.is_correct)
-        accuracy_pct = round((correct_count / total_answers * 100), 2) if total_answers > 0 else 0.0
+
+        total_answers = len(responses)
+        correct_count = sum(1 for r in responses if r.is_correct)
+        accuracy_pct = (correct_count / total_answers * 100) if total_answers > 0 else 0.0
 
         # Most common wrong answer
-        wrong_answers = [r.selected_answer for r in all_responses if not r.is_correct and r.selected_answer]
+        wrong_answers = [r.selected_answer for r in responses if not r.is_correct and r.selected_answer]
         most_common_wrong = None
         if wrong_answers:
             counter = Counter(wrong_answers)
             most_common_wrong = counter.most_common(1)[0][0]
 
+        bloom_level = mcq.bloom_level or "Unknown"
+
         question_breakdown.append({
-            "mcq_id": str(mcq.id),
+            "mcq_id": mcq.id,
             "question": mcq.question,
-            "bloom_level": mcq.bloom_level,
+            "bloom_level": bloom_level,
             "difficulty": mcq.difficulty,
-            "concept_id": str(mcq.concept_id) if mcq.concept_id else None,
+            "concept_id": mcq.concept_id,
             "total_answers": total_answers,
             "correct_count": correct_count,
-            "accuracy_pct": accuracy_pct,
+            "accuracy_pct": round(accuracy_pct, 2),
             "most_common_wrong_answer": most_common_wrong,
         })
 
-    # Sort hardest (lowest accuracy) first
+        # Accumulate bloom stats
+        if bloom_level not in bloom_accumulator:
+            bloom_accumulator[bloom_level] = {"questions": 0, "total_accuracy": 0.0}
+        bloom_accumulator[bloom_level]["questions"] += 1
+        bloom_accumulator[bloom_level]["total_accuracy"] += accuracy_pct
+
+    # Sort by accuracy ascending (hardest first)
     question_breakdown.sort(key=lambda x: x["accuracy_pct"])
 
+    # Build bloom_summary for all six levels
+    bloom_levels = ["Remember", "Understand", "Apply", "Analyze", "Evaluate", "Create"]
+    bloom_summary = {}
+    for level in bloom_levels:
+        if level in bloom_accumulator:
+            acc = bloom_accumulator[level]
+            n = acc["questions"]
+            bloom_summary[level] = {
+                "questions": n,
+                "avg_accuracy": round(acc["total_accuracy"] / n, 2) if n > 0 else 0.0,
+            }
+        else:
+            bloom_summary[level] = {"questions": 0, "avg_accuracy": 0.0}
+
     return {
-        "quiz_id": str(quiz_id),
-        "quiz_name": quiz_name,
+        "quiz_id": quiz_id,
+        "quiz_name": quiz.name,
         "total_attempts": total_attempts,
-        "avg_score_pct": avg_score_pct,
-        "completion_rate": completion_rate,
+        "completed_attempts": completed_count,
+        "completion_rate": round(completion_rate, 2),
+        "avg_score_pct": round(avg_score_pct, 2),
+        "score_distribution": distribution,
         "question_breakdown": question_breakdown,
-        "student_scores": student_scores,
+        "bloom_summary": bloom_summary,
     }

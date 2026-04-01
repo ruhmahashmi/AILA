@@ -1,487 +1,496 @@
 'use client';
-import { useState, useEffect, useMemo } from 'react';
-import { useRouter, useParams } from 'next/navigation';
+
+import { useState, useEffect } from 'react';
+import { useParams, useRouter } from 'next/navigation';
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
 
-// ─── Bloom level color mapping ────────────────────────────────────────────────
-const BLOOM_COLORS = {
-  Remember:   { bg: 'bg-violet-100',  text: 'text-violet-800',  bar: 'bg-violet-500'  },
-  Understand: { bg: 'bg-blue-100',    text: 'text-blue-800',    bar: 'bg-blue-500'    },
-  Apply:      { bg: 'bg-sky-100',     text: 'text-sky-800',     bar: 'bg-sky-500'     },
-  Analyze:    { bg: 'bg-amber-100',   text: 'text-amber-800',   bar: 'bg-amber-500'   },
-  Evaluate:   { bg: 'bg-orange-100',  text: 'text-orange-800',  bar: 'bg-orange-500'  },
-  Create:     { bg: 'bg-emerald-100', text: 'text-emerald-800', bar: 'bg-emerald-500' },
-};
+// ─── Bloom levels config ───────────────────────────────────────────────────
 
-const BLOOM_FALLBACK = { bg: 'bg-gray-100', text: 'text-gray-700', bar: 'bg-gray-400' };
+const BLOOM_LEVELS = [
+  { name: 'Remember', emoji: '🧠' },
+  { name: 'Understand', emoji: '💡' },
+  { name: 'Apply', emoji: '🔧' },
+  { name: 'Analyze', emoji: '🔍' },
+  { name: 'Evaluate', emoji: '⚖️' },
+  { name: 'Create', emoji: '✨' },
+];
 
-// ─── Difficulty badge colors ──────────────────────────────────────────────────
-const DIFFICULTY_COLORS = {
-  Easy:   'bg-green-100 text-green-800',
-  Medium: 'bg-yellow-100 text-yellow-800',
-  Hard:   'bg-red-100 text-red-800',
-};
+// ─── Score distribution buckets ────────────────────────────────────────────
 
-// ─── Accuracy bar color by pct ────────────────────────────────────────────────
-function accuracyBarColor(pct) {
+const SCORE_BUCKETS = [
+  { key: '0-20',   label: '0–20%',   colorClass: 'bg-red-500' },
+  { key: '21-40',  label: '21–40%',  colorClass: 'bg-orange-400' },
+  { key: '41-60',  label: '41–60%',  colorClass: 'bg-yellow-400' },
+  { key: '61-80',  label: '61–80%',  colorClass: 'bg-blue-500' },
+  { key: '81-100', label: '81–100%', colorClass: 'bg-green-500' },
+];
+
+// ─── Helper: accuracy bar color ────────────────────────────────────────────
+
+function accuracyColor(pct) {
   if (pct >= 75) return 'bg-green-500';
   if (pct >= 50) return 'bg-yellow-400';
   return 'bg-red-500';
 }
 
-// ─── Row highlight by score_pct ───────────────────────────────────────────────
-function scoreRowClass(pct) {
-  if (pct >= 80) return 'bg-green-50';
-  if (pct >= 60) return 'bg-yellow-50';
-  return 'bg-red-50';
+function accuracyTextColor(pct) {
+  if (pct >= 75) return 'text-green-700';
+  if (pct >= 50) return 'text-yellow-700';
+  return 'text-red-600';
 }
 
-// ─── Skeleton helpers ─────────────────────────────────────────────────────────
-function SkeletonLine({ width = 'w-full', height = 'h-4' }) {
-  return (
-    <div
-      className={`${width} ${height} bg-gray-200 rounded animate-pulse`}
-    />
-  );
-}
+// ─── Skeleton components ────────────────────────────────────────────────────
 
-function SkeletonCard() {
+function CardSkeleton() {
   return (
-    <div className="bg-white rounded-2xl shadow-sm p-6 flex flex-col gap-3">
-      <SkeletonLine width="w-1/2" height="h-3" />
-      <SkeletonLine width="w-1/4" height="h-8" />
+    <div className="bg-white rounded-xl border border-gray-100 p-4 animate-pulse">
+      <div className="h-3 bg-gray-200 rounded w-1/2 mb-3" />
+      <div className="h-7 bg-gray-200 rounded w-2/3" />
     </div>
   );
 }
 
-// ─── Format date ──────────────────────────────────────────────────────────────
-function formatDate(iso) {
-  if (!iso) return '—';
-  try {
-    return new Date(iso).toLocaleString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  } catch {
-    return iso;
-  }
-}
-
-// ─── Stat Card ────────────────────────────────────────────────────────────────
-function StatCard({ label, value, sub }) {
+function SectionSkeleton({ rows = 4 }) {
   return (
-    <div className="bg-white rounded-2xl shadow-sm p-6 flex flex-col gap-1">
-      <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">
-        {label}
-      </span>
-      <span className="text-3xl font-bold text-gray-900">{value}</span>
-      {sub && <span className="text-xs text-gray-400">{sub}</span>}
+    <div className="space-y-3 animate-pulse">
+      {[...Array(rows)].map((_, i) => (
+        <div key={i} className="flex items-center gap-3">
+          <div className="h-3 bg-gray-200 rounded w-16 shrink-0" />
+          <div className="flex-1 h-4 bg-gray-100 rounded" />
+          <div className="h-3 bg-gray-200 rounded w-8 shrink-0" />
+        </div>
+      ))}
     </div>
   );
 }
 
-// ─── Main component ───────────────────────────────────────────────────────────
-export default function QuizFeedbackPage() {
+// ─── Overview card ─────────────────────────────────────────────────────────
+
+function OverviewCard({ label, value, sub }) {
+  return (
+    <div className="bg-white rounded-xl border border-gray-100 p-4 flex flex-col gap-1 shadow-sm">
+      <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">{label}</p>
+      <p className="text-2xl font-bold text-gray-900">{value}</p>
+      {sub && <p className="text-xs text-gray-400">{sub}</p>}
+    </div>
+  );
+}
+
+// ─── Main page ─────────────────────────────────────────────────────────────
+
+export default function InstructorQuizFeedbackPage() {
+  const params = useParams();
   const router = useRouter();
-  const { id: courseId, weekNumber, quizId } = useParams();
+
+  const courseId = params?.id;
+  const weekNumber = params?.weekNumber;
+  const quizId = params?.quizId;
 
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+  const [error, setError] = useState('');
 
-  // ── Fetch feedback data ──────────────────────────────────────────────────────
+  // ── Fetch feedback data ──
+
   useEffect(() => {
     if (!quizId) return;
 
-    const raw = typeof window !== 'undefined' ? localStorage.getItem('user') : null;
-    const user = raw ? JSON.parse(raw) : null;
-
-    const fetchFeedback = async () => {
+    const fetchData = async () => {
+      setLoading(true);
+      setError('');
       try {
-        setLoading(true);
-        setError(null);
-
         const res = await fetch(
-          `${BACKEND_URL}/api/instructor/quiz/feedback?quiz_id=${encodeURIComponent(quizId)}`,
-          {
-            headers: {
-              'Content-Type': 'application/json',
-              ...(user?.id ? { 'X-User-Id': user.id } : {}),
-            },
-          }
+          `${BACKEND_URL}/api/instructor/course/${courseId}/week/${weekNumber}/quiz/${quizId}/feedback`
         );
-
-        if (!res.ok) {
-          const text = await res.text();
-          throw new Error(text || `Server error ${res.status}`);
-        }
-
+        if (!res.ok) throw new Error(`Failed to load quiz feedback (${res.status})`);
         const json = await res.json();
         setData(json);
       } catch (err) {
-        setError(err.message || 'Failed to load quiz feedback.');
+        setError(err.message || 'Could not load quiz feedback.');
       } finally {
         setLoading(false);
       }
     };
 
-    fetchFeedback();
-  }, [quizId]);
+    fetchData();
+  }, [courseId, weekNumber, quizId]);
 
-  // ── Bloom summary: aggregate question_breakdown by bloom_level ───────────────
-  const bloomSummary = useMemo(() => {
-    if (!data?.question_breakdown?.length) return [];
+  // ── Derived data ──
 
-    const map = {};
-    for (const q of data.question_breakdown) {
-      const lvl = q.bloom_level || 'Unknown';
-      if (!map[lvl]) map[lvl] = { total: 0, count: 0 };
-      map[lvl].total += q.accuracy_pct ?? 0;
-      map[lvl].count += 1;
-    }
+  const questionBreakdown = data?.question_breakdown ?? [];
+  const bloomSummary = data?.bloom_summary ?? {};
+  const scoreDistribution = data?.score_distribution ?? {};
 
-    return Object.entries(map)
-      .map(([level, { total, count }]) => ({
-        level,
-        avgAccuracy: count > 0 ? total / count : 0,
-        count,
-      }))
-      .sort((a, b) => a.avgAccuracy - b.avgAccuracy); // hardest first
-  }, [data]);
+  // Sort questions hardest first (lowest accuracy first)
+  const sortedQuestions = [...questionBreakdown].sort(
+    (a, b) => (a.accuracy_pct ?? 0) - (b.accuracy_pct ?? 0)
+  );
 
-  // ─── Loading skeleton ────────────────────────────────────────────────────────
+  const maxDistributionCount = Math.max(
+    1, // avoid divide-by-zero
+    ...SCORE_BUCKETS.map((b) => scoreDistribution[b.key] ?? 0)
+  );
+
+  const hasAnyDistribution = SCORE_BUCKETS.some(
+    (b) => (scoreDistribution[b.key] ?? 0) > 0
+  );
+
+  // ─── Loading state ────────────────────────────────────────────────────────
+
   if (loading) {
     return (
-      <div className="min-h-screen bg-gray-50 p-6">
+      <div className="min-h-screen bg-gray-50">
         {/* Header skeleton */}
-        <div className="mb-6 flex flex-col gap-2">
-          <SkeletonLine width="w-24" height="h-4" />
-          <SkeletonLine width="w-72" height="h-7" />
-          <SkeletonLine width="w-40" height="h-4" />
-        </div>
-
-        {/* Stats skeleton */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-          <SkeletonCard />
-          <SkeletonCard />
-          <SkeletonCard />
-          <SkeletonCard />
-        </div>
-
-        {/* Question skeleton */}
-        <div className="bg-white rounded-2xl shadow-sm p-6 mb-6 flex flex-col gap-4">
-          <SkeletonLine width="w-48" height="h-5" />
-          {[1, 2, 3].map((i) => (
-            <div key={i} className="border border-gray-100 rounded-xl p-4 flex flex-col gap-2">
-              <SkeletonLine width="w-full" height="h-4" />
-              <SkeletonLine width="w-2/3" height="h-3" />
-              <SkeletonLine width="w-full" height="h-3" />
+        <div className="bg-white border-b border-gray-100 px-6 py-4 animate-pulse">
+          <div className="flex items-center gap-4">
+            <div className="h-8 w-8 bg-gray-200 rounded-lg" />
+            <div className="space-y-1.5">
+              <div className="h-5 bg-gray-200 rounded w-48" />
+              <div className="h-3 bg-gray-100 rounded w-32" />
             </div>
-          ))}
+          </div>
+        </div>
+
+        <div className="max-w-5xl mx-auto px-6 py-8 space-y-8">
+          {/* Cards skeleton */}
+          <div className="grid grid-cols-5 gap-4">
+            {[...Array(5)].map((_, i) => <CardSkeleton key={i} />)}
+          </div>
+          {/* Section skeletons */}
+          <div className="bg-white rounded-xl border border-gray-100 p-6">
+            <div className="h-4 bg-gray-200 rounded w-36 mb-6 animate-pulse" />
+            <SectionSkeleton rows={5} />
+          </div>
+          <div className="bg-white rounded-xl border border-gray-100 p-6">
+            <div className="h-4 bg-gray-200 rounded w-44 mb-6 animate-pulse" />
+            <SectionSkeleton rows={6} />
+          </div>
         </div>
       </div>
     );
   }
 
-  // ─── Error state ──────────────────────────────────────────────────────────────
+  // ─── Error state ──────────────────────────────────────────────────────────
+
   if (error) {
     return (
-      <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-center p-6">
-        <div className="bg-white rounded-2xl shadow-sm p-8 max-w-md w-full text-center">
-          <div className="w-12 h-12 rounded-full bg-red-100 flex items-center justify-center mx-auto mb-4">
-            <svg className="w-6 h-6 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-8">
+        <div className="bg-white rounded-2xl border border-red-100 shadow-sm p-8 max-w-md w-full text-center space-y-4">
+          <div className="w-12 h-12 bg-red-50 rounded-full flex items-center justify-center mx-auto">
+            <svg className="w-6 h-6 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
             </svg>
           </div>
-          <h2 className="text-lg font-semibold text-gray-900 mb-1">Failed to load feedback</h2>
-          <p className="text-sm text-gray-500 mb-5">{error}</p>
+          <div>
+            <h2 className="text-base font-semibold text-gray-900">Failed to load feedback</h2>
+            <p className="text-sm text-gray-500 mt-1">{error}</p>
+          </div>
           <button
             onClick={() => router.back()}
-            className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors"
+            className="px-4 py-2 bg-gray-100 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-200 transition-colors"
           >
-            ← Go Back
+            Go Back
           </button>
         </div>
       </div>
     );
   }
 
-  // ─── No data guard ────────────────────────────────────────────────────────────
-  if (!data) return null;
-
-  const {
-    quiz_name,
-    total_attempts,
-    avg_score_pct,
-    completion_rate,
-    question_breakdown = [],
-    student_scores = [],
-  } = data;
+  // ─── Main render ──────────────────────────────────────────────────────────
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <div className="max-w-5xl mx-auto px-4 sm:px-6 py-8">
 
-        {/* ── 1. Header bar ────────────────────────────────────────────────── */}
-        <div className="mb-8">
+      {/* ══════════════════════════════════════════
+          HEADER BAR
+      ══════════════════════════════════════════ */}
+      <div className="bg-white border-b border-gray-100 sticky top-0 z-10">
+        <div className="max-w-5xl mx-auto px-6 py-4 flex items-center gap-4">
           <button
             onClick={() => router.back()}
-            className="inline-flex items-center gap-1 text-sm font-medium text-blue-600 hover:text-blue-800 transition-colors mb-3"
+            className="flex items-center justify-center w-8 h-8 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors shrink-0"
+            aria-label="Go back"
           >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
             </svg>
-            Back to Week
           </button>
-
-          <h1 className="text-2xl font-bold text-gray-900 leading-tight">
-            {quiz_name ? `${quiz_name} — Quiz Feedback` : 'Quiz Feedback'}
-          </h1>
-          <p className="text-sm text-gray-500 mt-1">
-            Week {weekNumber} · Course {courseId}
-          </p>
+          <div className="min-w-0">
+            <h1 className="text-base font-semibold text-gray-900 truncate">
+              {data?.quiz_name ?? 'Quiz Feedback'}
+            </h1>
+            <p className="text-xs text-gray-400 mt-0.5">
+              Week {weekNumber} · Course {courseId}
+            </p>
+          </div>
         </div>
+      </div>
 
-        {/* ── 2. Overview stats row ────────────────────────────────────────── */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-          <StatCard
+      <div className="max-w-5xl mx-auto px-6 py-8 space-y-8">
+
+        {/* ══════════════════════════════════════════
+            OVERVIEW CARDS
+        ══════════════════════════════════════════ */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+          <OverviewCard
             label="Total Attempts"
-            value={total_attempts ?? '—'}
-            sub="submissions"
+            value={data?.total_attempts ?? '—'}
           />
-          <StatCard
-            label="Avg Score"
-            value={avg_score_pct != null ? `${avg_score_pct.toFixed(1)}%` : '—'}
-            sub="class average"
+          <OverviewCard
+            label="Completed"
+            value={data?.completed_attempts ?? '—'}
           />
-          <StatCard
+          <OverviewCard
             label="Completion Rate"
-            value={completion_rate != null ? `${Math.round(completion_rate)}%` : '—'}
-            sub="of enrolled students"
+            value={data?.completion_rate != null ? `${data.completion_rate.toFixed(1)}%` : '—'}
           />
-          <StatCard
+          <OverviewCard
+            label="Avg Score"
+            value={data?.avg_score_pct != null ? `${data.avg_score_pct.toFixed(1)}%` : '—'}
+          />
+          <OverviewCard
             label="Questions"
-            value={question_breakdown.length}
-            sub="total items"
+            value={questionBreakdown.length}
           />
         </div>
 
-        {/* ── 3. Question Difficulty Breakdown ────────────────────────────── */}
-        <section className="bg-white rounded-2xl shadow-sm p-6 mb-6">
-          <h2 className="text-base font-semibold text-gray-900 mb-1">
-            Question Analysis
-          </h2>
-          <p className="text-xs text-gray-400 mb-5">
-            Sorted by difficulty — hardest first (lowest accuracy)
-          </p>
+        {/* ══════════════════════════════════════════
+            SCORE DISTRIBUTION
+        ══════════════════════════════════════════ */}
+        <section className="bg-white rounded-xl border border-gray-100 shadow-sm p-6">
+          <h2 className="text-sm font-semibold text-gray-900 mb-5">Score Distribution</h2>
 
-          {question_breakdown.length === 0 ? (
-            <p className="text-sm text-gray-500 py-4 text-center">No question data available.</p>
+          {!hasAnyDistribution ? (
+            <p className="text-sm text-gray-400 text-center py-6">No completed attempts yet</p>
           ) : (
-            <div className="flex flex-col gap-4">
-              {question_breakdown.map((q, idx) => {
-                const bloom = BLOOM_COLORS[q.bloom_level] || BLOOM_FALLBACK;
-                const diffClass = DIFFICULTY_COLORS[q.difficulty] || 'bg-gray-100 text-gray-700';
-                const barColor = accuracyBarColor(q.accuracy_pct ?? 0);
-                const widthPct = Math.min(Math.max(q.accuracy_pct ?? 0, 0), 100);
+            <div className="space-y-3">
+              {SCORE_BUCKETS.map(({ key, label, colorClass }) => {
+                const count = scoreDistribution[key] ?? 0;
+                const widthPct = maxDistributionCount > 0
+                  ? Math.round((count / maxDistributionCount) * 100)
+                  : 0;
+                return (
+                  <div key={key} className="flex items-center gap-3">
+                    {/* Bucket label */}
+                    <span className="text-xs font-medium text-gray-500 w-14 shrink-0 text-right">
+                      {label}
+                    </span>
+                    {/* Bar track */}
+                    <div className="flex-1 h-5 bg-gray-100 rounded-full overflow-hidden">
+                      <div
+                        className={`h-full rounded-full transition-all duration-500 ${colorClass}`}
+                        style={{ width: `${widthPct}%`, minWidth: count > 0 ? '4px' : '0' }}
+                      />
+                    </div>
+                    {/* Count */}
+                    <span className="text-xs font-semibold text-gray-700 w-6 shrink-0 text-right">
+                      {count}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </section>
 
+        {/* ══════════════════════════════════════════
+            BLOOM LEVEL SUMMARY
+        ══════════════════════════════════════════ */}
+        <section className="bg-white rounded-xl border border-gray-100 shadow-sm p-6">
+          <h2 className="text-sm font-semibold text-gray-900 mb-5">
+            Performance by Bloom Level
+          </h2>
+
+          <div className="space-y-3">
+            {BLOOM_LEVELS.map(({ name, emoji }) => {
+              const levelData = bloomSummary[name];
+              const hasQuestions = levelData && levelData.questions > 0;
+              const accuracy = hasQuestions ? levelData.avg_accuracy : null;
+
+              return (
+                <div key={name} className="flex items-center gap-3">
+                  {/* Level name */}
+                  <div className="w-28 shrink-0 flex items-center gap-1.5">
+                    <span className="text-base leading-none" aria-hidden="true">{emoji}</span>
+                    <span className="text-xs font-medium text-gray-700">{name}</span>
+                  </div>
+
+                  {/* Question count chip */}
+                  <span className={`text-xs px-2 py-0.5 rounded-full shrink-0 font-medium ${
+                    hasQuestions
+                      ? 'bg-blue-50 text-blue-700'
+                      : 'bg-gray-100 text-gray-400'
+                  }`}>
+                    {hasQuestions ? `${levelData.questions}q` : '0q'}
+                  </span>
+
+                  {/* Bar or dash */}
+                  {hasQuestions ? (
+                    <>
+                      <div className="flex-1 h-4 bg-gray-100 rounded-full overflow-hidden">
+                        <div
+                          className={`h-full rounded-full transition-all duration-500 ${accuracyColor(accuracy)}`}
+                          style={{ width: `${Math.min(accuracy, 100)}%` }}
+                        />
+                      </div>
+                      <span className={`text-xs font-semibold w-10 text-right shrink-0 ${accuracyTextColor(accuracy)}`}>
+                        {accuracy.toFixed(0)}%
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <div className="flex-1" />
+                      <span className="text-sm text-gray-300 w-10 text-right shrink-0">—</span>
+                    </>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
+        {/* ══════════════════════════════════════════
+            QUESTION BREAKDOWN
+        ══════════════════════════════════════════ */}
+        {sortedQuestions.length > 0 && (
+          <section className="bg-white rounded-xl border border-gray-100 shadow-sm p-6">
+            <h2 className="text-sm font-semibold text-gray-900 mb-1">Question Breakdown</h2>
+            <p className="text-xs text-gray-400 mb-5">Sorted by difficulty — hardest first</p>
+
+            <div className="space-y-5">
+              {sortedQuestions.map((q, idx) => {
+                const accuracy = q.accuracy_pct ?? 0;
                 return (
                   <div
-                    key={q.mcq_id || idx}
-                    className="border border-gray-100 rounded-xl p-4 hover:border-gray-200 transition-colors"
+                    key={q.question_id ?? idx}
+                    className="border border-gray-100 rounded-xl p-4 space-y-3"
                   >
-                    {/* Question header */}
-                    <div className="flex gap-3 items-start mb-3">
-                      {/* Number badge */}
-                      <span className="flex-shrink-0 w-7 h-7 rounded-full bg-blue-600 text-white text-xs font-bold flex items-center justify-center mt-0.5">
-                        {idx + 1}
+                    {/* Question text + index */}
+                    <div className="flex items-start gap-3">
+                      <span className="text-xs font-bold text-gray-300 mt-0.5 shrink-0 w-5">
+                        {idx + 1}.
                       </span>
                       <p className="text-sm font-medium text-gray-800 leading-snug flex-1">
-                        {q.question}
+                        {q.question_text ?? `Question ${idx + 1}`}
                       </p>
                     </div>
 
-                    {/* Chips row */}
-                    <div className="flex flex-wrap gap-2 mb-3 ml-10">
-                      {/* Bloom level */}
+                    {/* Chips: bloom / difficulty / concept */}
+                    <div className="flex flex-wrap gap-1.5 pl-8">
                       {q.bloom_level && (
-                        <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${bloom.bg} ${bloom.text}`}>
+                        <span className="text-xs bg-purple-50 text-purple-700 rounded-full px-2.5 py-0.5 font-medium">
                           {q.bloom_level}
                         </span>
                       )}
-                      {/* Difficulty */}
                       {q.difficulty && (
-                        <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${diffClass}`}>
-                          {q.difficulty}
+                        <span className={`text-xs rounded-full px-2.5 py-0.5 font-medium ${
+                          q.difficulty === 'hard'
+                            ? 'bg-red-50 text-red-700'
+                            : q.difficulty === 'medium'
+                            ? 'bg-yellow-50 text-yellow-700'
+                            : 'bg-green-50 text-green-700'
+                        }`}>
+                          {q.difficulty.charAt(0).toUpperCase() + q.difficulty.slice(1)}
                         </span>
                       )}
-                      {/* Concept ID */}
-                      {q.concept_id && (
-                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">
-                          {q.concept_id}
+                      {q.concept && (
+                        <span className="text-xs bg-gray-100 text-gray-600 rounded-full px-2.5 py-0.5 font-medium">
+                          {q.concept}
                         </span>
                       )}
                     </div>
 
                     {/* Accuracy bar */}
-                    <div className="ml-10">
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="text-xs text-gray-500">
-                          {q.correct_count}/{q.total_answers} correct &nbsp;·&nbsp; {(q.accuracy_pct ?? 0).toFixed(1)}%
+                    <div className="pl-8 space-y-1.5">
+                      <div className="flex items-center gap-3">
+                        <div className="flex-1 h-3 bg-gray-100 rounded-full overflow-hidden">
+                          <div
+                            className={`h-full rounded-full transition-all duration-500 ${accuracyColor(accuracy)}`}
+                            style={{ width: `${Math.min(accuracy, 100)}%` }}
+                          />
+                        </div>
+                        <span className={`text-xs font-semibold w-10 text-right shrink-0 ${accuracyTextColor(accuracy)}`}>
+                          {accuracy.toFixed(0)}%
                         </span>
                       </div>
-                      <div className="w-full bg-gray-100 rounded-full h-2.5 overflow-hidden">
-                        <div
-                          className={`h-2.5 rounded-full transition-all duration-500 ${barColor}`}
-                          style={{ width: `${widthPct}%` }}
-                        />
+                      <p className="text-xs text-gray-400">
+                        {q.correct_count ?? 0} of {q.attempt_count ?? 0} correct
+                      </p>
+                    </div>
+
+                    {/* Most common wrong answer */}
+                    {q.most_common_wrong_answer && (
+                      <div className="pl-8">
+                        <div className="flex items-start gap-2 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
+                          <svg className="w-3.5 h-3.5 text-amber-500 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                          </svg>
+                          <div className="min-w-0">
+                            <span className="text-xs font-medium text-amber-700">
+                              Most common wrong answer:{' '}
+                            </span>
+                            <span className="text-xs text-amber-800">
+                              "{q.most_common_wrong_answer}"
+                            </span>
+                            {q.most_common_wrong_count && (
+                              <span className="text-xs text-amber-500 ml-1">
+                                ({q.most_common_wrong_count}×)
+                              </span>
+                            )}
+                          </div>
+                        </div>
                       </div>
+                    )}
 
-                      {/* Most common wrong answer */}
-                      {q.most_common_wrong_answer && (
-                        <p className="mt-2 text-xs text-amber-700 bg-amber-50 rounded-md px-2.5 py-1.5 inline-block">
-                          Most missed: <span className="font-semibold">{q.most_common_wrong_answer}</span>
-                        </p>
-                      )}
-                    </div>
+                    {/* Answer options breakdown (if available) */}
+                    {q.answer_options && q.answer_options.length > 0 && (
+                      <div className="pl-8 space-y-1.5">
+                        <p className="text-xs font-medium text-gray-500">Answer distribution</p>
+                        {q.answer_options.map((opt, oi) => (
+                          <div key={oi} className="flex items-center gap-2">
+                            <span className={`text-xs w-5 shrink-0 font-mono ${
+                              opt.is_correct ? 'text-green-600 font-bold' : 'text-gray-400'
+                            }`}>
+                              {opt.label ?? String.fromCharCode(65 + oi)}.
+                            </span>
+                            <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
+                              <div
+                                className={`h-full rounded-full ${
+                                  opt.is_correct ? 'bg-green-400' : 'bg-gray-300'
+                                }`}
+                                style={{
+                                  width: `${
+                                    (q.attempt_count ?? 0) > 0
+                                      ? Math.round(((opt.count ?? 0) / q.attempt_count) * 100)
+                                      : 0
+                                  }%`,
+                                }}
+                              />
+                            </div>
+                            <span className="text-xs text-gray-500 w-6 text-right shrink-0">
+                              {opt.count ?? 0}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 );
               })}
             </div>
-          )}
-        </section>
-
-        {/* ── 4. Student Scores ────────────────────────────────────────────── */}
-        <section className="bg-white rounded-2xl shadow-sm p-6 mb-6">
-          <h2 className="text-base font-semibold text-gray-900 mb-5">
-            Student Performance
-          </h2>
-
-          {student_scores.length === 0 ? (
-            <p className="text-sm text-gray-500 text-center py-4">
-              No completed attempts yet.
-            </p>
-          ) : (
-            <div className="overflow-x-auto -mx-2">
-              <table className="min-w-full text-sm">
-                <thead>
-                  <tr className="border-b border-gray-100">
-                    <th className="text-left py-2 px-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">
-                      Student ID
-                    </th>
-                    <th className="text-center py-2 px-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">
-                      Score
-                    </th>
-                    <th className="text-center py-2 px-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">
-                      %
-                    </th>
-                    <th className="text-left py-2 px-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">
-                      Completed At
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-50">
-                  {student_scores.map((s, idx) => {
-                    const rowBg = scoreRowClass(s.score_pct ?? 0);
-                    const shortId = s.student_id
-                      ? s.student_id.length > 8
-                        ? `${s.student_id.slice(0, 8)}…`
-                        : s.student_id
-                      : '—';
-
-                    return (
-                      <tr key={s.student_id || idx} className={`${rowBg} transition-colors`}>
-                        <td className="py-2.5 px-3 font-mono text-xs text-gray-700">
-                          {shortId}
-                        </td>
-                        <td className="py-2.5 px-3 text-center font-semibold text-gray-800">
-                          {s.score}/{s.total}
-                        </td>
-                        <td className="py-2.5 px-3 text-center">
-                          <span
-                            className={`inline-block px-2 py-0.5 rounded-full text-xs font-semibold
-                              ${(s.score_pct ?? 0) >= 80
-                                ? 'bg-green-100 text-green-800'
-                                : (s.score_pct ?? 0) >= 60
-                                  ? 'bg-yellow-100 text-yellow-800'
-                                  : 'bg-red-100 text-red-800'
-                              }`}
-                          >
-                            {(s.score_pct ?? 0).toFixed(1)}%
-                          </span>
-                        </td>
-                        <td className="py-2.5 px-3 text-xs text-gray-500">
-                          {formatDate(s.completed_at)}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </section>
-
-        {/* ── 5. Bloom Level Summary ───────────────────────────────────────── */}
-        {bloomSummary.length > 0 && (
-          <section className="bg-white rounded-2xl shadow-sm p-6">
-            <h2 className="text-base font-semibold text-gray-900 mb-1">
-              Bloom Level Summary
-            </h2>
-            <p className="text-xs text-gray-400 mb-5">
-              Average accuracy per cognitive level — sorted from weakest to strongest
-            </p>
-
-            <div className="flex flex-col gap-3">
-              {bloomSummary.map(({ level, avgAccuracy, count }) => {
-                const bloom = BLOOM_COLORS[level] || BLOOM_FALLBACK;
-                const widthPct = Math.min(Math.max(avgAccuracy, 0), 100);
-
-                return (
-                  <div key={level} className="flex items-center gap-3">
-                    {/* Level label */}
-                    <div className="w-28 flex-shrink-0">
-                      <span
-                        className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium w-full justify-center ${bloom.bg} ${bloom.text}`}
-                      >
-                        {level}
-                      </span>
-                    </div>
-
-                    {/* Bar track */}
-                    <div className="flex-1 bg-gray-100 rounded-full h-3 overflow-hidden">
-                      <div
-                        className={`h-3 rounded-full transition-all duration-700 ${bloom.bar}`}
-                        style={{ width: `${widthPct}%` }}
-                      />
-                    </div>
-
-                    {/* Stats */}
-                    <div className="w-28 flex-shrink-0 text-right">
-                      <span className="text-sm font-semibold text-gray-800">
-                        {avgAccuracy.toFixed(1)}%
-                      </span>
-                      <span className="text-xs text-gray-400 ml-1.5">
-                        ({count} Q{count !== 1 ? 's' : ''})
-                      </span>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* Interpretation hint */}
-            <p className="mt-5 text-xs text-gray-400 border-t border-gray-50 pt-4">
-              Levels with low accuracy may benefit from additional instructional focus or re-teaching.
-            </p>
           </section>
         )}
 
+        {/* Empty question state */}
+        {!loading && questionBreakdown.length === 0 && (
+          <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-10 text-center">
+            <p className="text-sm text-gray-400">No question data available for this quiz.</p>
+          </div>
+        )}
+
+        {/* Bottom spacer */}
+        <div className="h-8" />
       </div>
     </div>
   );

@@ -12,6 +12,7 @@ import UploadedFilesList from "../../../../../components/UploadedFilesList";
 import ConceptGraph from "../../../../../components/ConceptGraph";
 import QuizSettingsForm from "../../../../../components/QuizSettingsForm";
 import InstructorDashboard from '../../../../../components/InstructorDashboard';
+import EnrollStudents from '../../../../../components/EnrollStudents';
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
 const WEEK_COUNT = 11;
@@ -337,6 +338,20 @@ export default function CourseWeekPage({ params }) {
   const week = Number(weekNumber);
 
   // --- STATE ---
+  const [enrollModalOpen, setEnrollModalOpen] = useState(false);
+  const [instructorId, setInstructorId] = useState(null);
+
+  // Read instructorId from localStorage on mount
+  useEffect(() => {
+    try {
+      const stored = typeof window !== 'undefined' ? localStorage.getItem('user') : null;
+      if (stored) {
+        const user = JSON.parse(stored);
+        setInstructorId(user.id);
+      }
+    } catch {}
+  }, []);
+
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [refreshTrigger, setRefreshTrigger] = useState(0); // This controls the refresh
   const [knowledgeGraph, setKnowledgeGraph] = useState({ nodes: [], edges: [] });
@@ -635,7 +650,22 @@ export default function CourseWeekPage({ params }) {
                </h1>
                <p className="text-sm text-gray-400 mt-1 font-mono">ID: {courseId}</p>
             </div>
+            <button
+              onClick={() => setEnrollModalOpen(true)}
+              className="px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-xl hover:bg-blue-700 transition-colors shadow-sm flex items-center gap-2"
+            >
+              <span>+</span> Manage Students
+            </button>
           </div>
+
+          {/* ENROLL STUDENTS MODAL */}
+          {enrollModalOpen && instructorId && (
+            <EnrollStudents
+              courseId={courseId}
+              instructorId={instructorId}
+              onClose={() => setEnrollModalOpen(false)}
+            />
+          )}
 
             {/* TWO-COLUMN LAYOUT: UPLOAD & FILES LIST */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch">
@@ -811,6 +841,15 @@ export default function CourseWeekPage({ params }) {
                           </p>
                         </div>
                         
+                        {/* VIEW FEEDBACK BUTTON */}
+                        <button
+                          onClick={(e) => { e.stopPropagation(); router.push(`/instructor/course/${courseId}/week/${weekNumber}/quiz/${q.id}/feedback`); }}
+                          className="absolute right-10 top-2 px-2 py-1 text-xs font-semibold text-blue-600 border border-blue-200 rounded-lg hover:bg-blue-50 opacity-0 group-hover:opacity-100 transition-all z-20"
+                          title="View Quiz Feedback"
+                        >
+                          Feedback
+                        </button>
+
                         {/* DELETE BUTTON */}
                         <button
                           onClick={(e) => handleDeleteQuiz(e, q.id)}
