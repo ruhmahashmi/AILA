@@ -3350,11 +3350,15 @@ def unenroll_student(
 
 
 # ── Endpoint 5: GET /api/instructor/quiz/feedback (aggregate/anonymous) ──────
+# Also reachable via REST-style path used by the feedback page
 
+@app.get("/api/instructor/course/{course_id}/week/{week}/quiz/{quiz_id}/feedback")
 @app.get("/api/instructor/quiz/feedback")
 def get_quiz_feedback_aggregate(
     quiz_id: str,
     db: Session = Depends(get_db),
+    course_id: str = None,
+    week: int = None,
 ):
     quiz = db.query(Quiz).filter(Quiz.id == quiz_id).first()
     if not quiz:
@@ -3368,22 +3372,21 @@ def get_quiz_feedback_aggregate(
     completion_rate = (completed_count / total_attempts * 100) if total_attempts > 0 else 0.0
 
     # Average score across completed attempts only
-    scores = [a.score_pct for a in completed_attempts if a.score_pct is not None]
+    # score_pct is computed from score / total_questions (no stored column)
+    scores = []
+    for a in completed_attempts:
+        if a.total_questions and a.total_questions > 0:
+            scores.append(round((a.score / a.total_questions) * 100, 2))
     avg_score_pct = (sum(scores) / len(scores)) if scores else 0.0
 
-    # Score distribution buckets
+    # Score distribution uses the same computed values
     distribution = {"0-20": 0, "21-40": 0, "41-60": 0, "61-80": 0, "81-100": 0}
     for s in scores:
-        if s <= 20:
-            distribution["0-20"] += 1
-        elif s <= 40:
-            distribution["21-40"] += 1
-        elif s <= 60:
-            distribution["41-60"] += 1
-        elif s <= 80:
-            distribution["61-80"] += 1
-        else:
-            distribution["81-100"] += 1
+        if s <= 20: distribution["0-20"] += 1
+        elif s <= 40: distribution["21-40"] += 1
+        elif s <= 60: distribution["41-60"] += 1
+        elif s <= 80: distribution["61-80"] += 1
+        else: distribution["81-100"] += 1
 
     # Question-level breakdown
     mcqs = db.query(MCQ).filter(MCQ.quiz_id == quiz_id).all()
@@ -3412,16 +3415,23 @@ def get_quiz_feedback_aggregate(
 
         bloom_level = mcq.bloom_level or "Unknown"
 
+        # Count per wrong answer for most_common_wrong_count
+        most_common_wrong_count = None
+        if wrong_answers:
+            counter_wc = Counter(wrong_answers)
+            most_common_wrong_count = counter_wc.most_common(1)[0][1]
+
         question_breakdown.append({
-            "mcq_id": mcq.id,
-            "question": mcq.question,
+            "question_id": mcq.id,
+            "question_text": mcq.question,
             "bloom_level": bloom_level,
-            "difficulty": mcq.difficulty,
-            "concept_id": mcq.concept_id,
-            "total_answers": total_answers,
+            "difficulty": (mcq.difficulty or "Medium").lower(),
+            "concept": mcq.concept_id,
+            "attempt_count": total_answers,
             "correct_count": correct_count,
             "accuracy_pct": round(accuracy_pct, 2),
             "most_common_wrong_answer": most_common_wrong,
+            "most_common_wrong_count": most_common_wrong_count,
         })
 
         # Accumulate bloom stats
