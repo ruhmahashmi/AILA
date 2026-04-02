@@ -2483,8 +2483,8 @@ async def start_student_quiz(
                 print(f"[FILTER] Rejected MCQ {m.id[:8]} - difficulty {q_diff_str} outside range")
                 continue
 
-            # Bloom filter
-            q_bloom = (m.bloom_level or "Remember").strip()
+            # Bloom filter — normalise to Title case to avoid casing mismatches
+            q_bloom = (m.bloom_level or "Remember").strip().title()
             if q_bloom not in allowed_blooms:
                 print(f"[FILTER] Rejected MCQ {m.id[:8]} - bloom {q_bloom} not in {allowed_blooms}")
                 continue
@@ -2510,11 +2510,22 @@ async def start_student_quiz(
         stored_meta = active_attempt.responses or {}
         stored_q_ids = stored_meta.get("__question_ids__", [])
 
-        if stored_q_ids:
+        stored_bloom_target = stored_meta.get("__bloom_target__")
+        bloom_target_changed = (
+            adaptive_target_bloom is not None
+            and stored_bloom_target != adaptive_target_bloom
+        )
+
+        if stored_q_ids and not bloom_target_changed:
             # Restore the exact same question order from when the attempt was created
             id_to_mcq = {m.id: m for m in db.query(MCQ).filter(MCQ.id.in_(stored_q_ids)).all()}
             selected_mcqs = [id_to_mcq[qid] for qid in stored_q_ids if qid in id_to_mcq]
+            print(f"[RESUME] Restored {len(selected_mcqs)} questions (bloom_target='{stored_bloom_target}')")
         else:
+            if bloom_target_changed:
+                print(f"[RESUME] Bloom target changed {stored_bloom_target!r} -> {adaptive_target_bloom!r}, re-selecting questions")
+            else:
+                print("[RESUME] No stored question IDs, selecting fresh set")
             # Legacy resume: no stored IDs — re-select and save them
             valid_mcqs, all_mcqs = get_filtered_mcqs()
             target_pool = valid_mcqs if valid_mcqs else all_mcqs
@@ -2534,9 +2545,9 @@ async def start_student_quiz(
             if adaptive_target_bloom:
                 target_idx = BLOOM_LEVELS.index(adaptive_target_bloom)
                 target_bloom_mcqs = [m for m in target_pool
-                                      if (m.bloom_level or "Remember") == adaptive_target_bloom]
+                                      if (m.bloom_level or "Remember").strip().title() == adaptive_target_bloom]
                 below_target_mcqs = [m for m in target_pool
-                                      if (m.bloom_level or "Remember") in BLOOM_LEVELS[:target_idx]]
+                                      if (m.bloom_level or "Remember").strip().title() in BLOOM_LEVELS[:target_idx]]
                 random.shuffle(target_bloom_mcqs)
                 random.shuffle(below_target_mcqs)
                 target_count = min(len(target_bloom_mcqs), max(1, int(max_q * 0.7)))
@@ -2549,8 +2560,9 @@ async def start_student_quiz(
             else:
                 selected_mcqs = random.sample(target_pool, min(len(target_pool), max_q))
 
-            # Save question IDs for stable resume next time
+            # Save question IDs + bloom target for stable, target-aware resume
             stored_meta["__question_ids__"] = [m.id for m in selected_mcqs]
+            stored_meta["__bloom_target__"] = adaptive_target_bloom
             active_attempt.responses = stored_meta
             db.commit()
 
@@ -2599,11 +2611,11 @@ async def start_student_quiz(
     if adaptive_target_bloom:
         target_idx = BLOOM_LEVELS.index(adaptive_target_bloom)
 
-        # Partition pool by relationship to target
+        # Partition pool by relationship to target (normalise casing)
         target_bloom_mcqs = [m for m in target_pool
-                             if (m.bloom_level or "Remember") == adaptive_target_bloom]
+                             if (m.bloom_level or "Remember").strip().title() == adaptive_target_bloom]
         below_target_mcqs = [m for m in target_pool
-                             if (m.bloom_level or "Remember") in BLOOM_LEVELS[:target_idx]]
+                             if (m.bloom_level or "Remember").strip().title() in BLOOM_LEVELS[:target_idx]]
         # Never include questions ABOVE the target level
         random.shuffle(target_bloom_mcqs)
         random.shuffle(below_target_mcqs)
@@ -2633,8 +2645,8 @@ async def start_student_quiz(
         score=0,
         total_questions=0,
         completed=False,
-        # Store question IDs so resume always shows the exact same question set
-        responses={"__question_ids__": [m.id for m in selected_mcqs]}
+        # Store question IDs + bloom target so resume can detect if target advanced
+        responses={"__question_ids__": [m.id for m in selected_mcqs], "__bloom_target__": adaptive_target_bloom}
     )
     db.add(new_attempt)
     db.commit()
@@ -3183,7 +3195,7 @@ def get_adaptive_bloom(student_id: str, quiz_id: str, db: Session = Depends(get_
             mcq = db.query(MCQ).filter(MCQ.id == resp.mcq_id).first()
             if not mcq:
                 continue
-            bloom = mcq.bloom_level
+            bloom = (mcq.bloom_level or "Remember").strip().title()
             if bloom in bloom_performance:
                 bloom_performance[bloom]["total"] += 1
                 if resp.is_correct:
