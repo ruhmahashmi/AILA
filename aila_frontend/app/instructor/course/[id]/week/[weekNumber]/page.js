@@ -783,6 +783,7 @@ export default function CourseWeekPage({ params }) {
                 courseId={courseId}
                 week={Number(weekNumber)}
                 concepts={knowledgeGraph.nodes}
+                edges={knowledgeGraph.edges}
                 onQuizCreated={fetchQuizzes}
                 onConceptClick={handleConceptSelect}
               />
