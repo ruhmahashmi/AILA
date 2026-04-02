@@ -738,11 +738,30 @@ def compute_levels(nodes, edges, explicit_root=None):
 
 
     
+def _normalize_label(label: str) -> str:
+    """Lowercase, strip punctuation, collapse whitespace for similarity comparison."""
+    import re
+    return re.sub(r'[^a-z0-9 ]', '', label.lower()).strip()
+
+
+def _similar_labels(a: str, b: str, threshold: float = 0.85) -> bool:
+    """True if two concept labels are similar enough to be the same concept."""
+    from difflib import SequenceMatcher
+    na, nb = _normalize_label(a), _normalize_label(b)
+    if na == nb:
+        return True
+    # Short labels need exact match; longer ones use similarity ratio
+    if min(len(na), len(nb)) < 4:
+        return na == nb
+    return SequenceMatcher(None, na, nb).ratio() >= threshold
+
+
 def merge_graphs(graphs_list, week_number):
-    merged_nodes = {}
+    merged_nodes = {}     # id -> node dict
+    id_remap = {}         # old_id -> canonical_id (for duplicate resolution)
     merged_edges = []
     seen_edges = set()
-    
+
     # 1. Create Week Root (Level 0)
     week_root_id = f"Week {week_number} Overview"
     week_root = {
@@ -751,63 +770,79 @@ def merge_graphs(graphs_list, week_number):
         "isRoot": True,
         "level": 0,
         "type": "root",
-        "summary": "Overview of all topics."
+        "summary": "Overview of all topics covered this week."
     }
     merged_nodes[week_root_id] = week_root
 
     for g in graphs_list:
         local_nodes = {n['id']: n for n in g.get('nodes', [])}
         local_edges = g.get('edges', [])
-        
+
         # 2. Find File Root
         file_root_id = None
         for nid, node in local_nodes.items():
             if node.get('isRoot') or node.get('level') == 0:
                 file_root_id = nid
                 break
-        
-        # 3. BFS to Shift Levels (Crucial Step)
-        # If FileRoot moves to Level 1, its children move to Level 2, etc.
+
+        # 3. BFS to shift levels (file root → level 1)
         if file_root_id:
-            queue = deque([(file_root_id, 1)]) # Start at Level 1
+            queue = deque([(file_root_id, 1)])
             visited = {file_root_id}
-            
-            # Build adjacency
             adj = defaultdict(list)
             for e in local_edges:
                 adj[e['source']].append(e['target'])
-            
             while queue:
                 curr, new_lvl = queue.popleft()
                 if curr in local_nodes:
                     local_nodes[curr]['level'] = new_lvl
-                    local_nodes[curr]['isRoot'] = False # Demote from root
-                
+                    local_nodes[curr]['isRoot'] = False
                 for child in adj[curr]:
                     if child not in visited:
                         visited.add(child)
                         queue.append((child, new_lvl + 1))
 
-        # 4. Merge Nodes
-        for node in local_nodes.values():
-            if node['id'] not in merged_nodes:
-                merged_nodes[node['id']] = node
-        
-        # 5. Merge Edges
+        # 4. Merge Nodes with label-similarity dedup
+        for nid, node in local_nodes.items():
+            label = node.get('label', nid)
+
+            # Check if a node with a similar label already exists
+            canonical_id = None
+            for existing_id, existing_node in merged_nodes.items():
+                if existing_id == week_root_id:
+                    continue
+                if _similar_labels(label, existing_node.get('label', existing_id)):
+                    canonical_id = existing_id
+                    break
+
+            if canonical_id:
+                # Duplicate found — remap this ID to the canonical one
+                id_remap[nid] = canonical_id
+                # Merge slide_nums from the duplicate into the canonical node
+                existing = merged_nodes[canonical_id]
+                existing_nums = existing.get('slide_nums', [])
+                new_nums = node.get('slide_nums', [])
+                if isinstance(new_nums, list) and isinstance(existing_nums, list):
+                    existing['slide_nums'] = sorted(set(existing_nums) | set(new_nums))
+            else:
+                # New unique concept
+                id_remap[nid] = nid
+                merged_nodes[nid] = node
+
+        # 5. Merge Edges (rewrite IDs through remap table)
         for edge in local_edges:
-            sig = (edge['source'], edge['target'])
-            if sig not in seen_edges:
+            src = id_remap.get(edge['source'], edge['source'])
+            tgt = id_remap.get(edge['target'], edge['target'])
+            sig = (src, tgt)
+            if sig not in seen_edges and src != tgt:
                 seen_edges.add(sig)
-                merged_edges.append(edge)
-                
-        # 6. Connect File Root -> Week Root
-        if file_root_id and (week_root_id, file_root_id) not in seen_edges:
-            merged_edges.append({
-                "source": week_root_id,
-                "target": file_root_id,
-                "relation": "topic"
-            })
-            seen_edges.add((week_root_id, file_root_id))
+                merged_edges.append({"source": src, "target": tgt, "relation": edge.get('relation', 'related')})
+
+        # 6. Connect File Root → Week Root
+        canonical_file_root = id_remap.get(file_root_id, file_root_id) if file_root_id else None
+        if canonical_file_root and (week_root_id, canonical_file_root) not in seen_edges:
+            merged_edges.append({"source": week_root_id, "target": canonical_file_root, "relation": "topic"})
+            seen_edges.add((week_root_id, canonical_file_root))
 
     return {"nodes": list(merged_nodes.values()), "edges": merged_edges}
 
