@@ -234,7 +234,7 @@ export default function StudentCourseWeekPage({ params }) {
   );
 
   if (activeQuizId) {
-    if (loadingQuiz) {
+    if (loadingQuiz || !quizData) {
       return (
         <div className="flex min-h-screen items-center justify-center bg-gray-50">
           <div className="text-center">
@@ -355,7 +355,7 @@ export default function StudentCourseWeekPage({ params }) {
             <div className="flex items-center gap-3">
               <span className="text-sm text-gray-500 font-medium">Question {currentQuestionIndex + 1} of {quizData.questions.length}</span>
               <div className="bg-blue-50 px-3 py-1 rounded-full text-xs font-semibold text-blue-600 border border-blue-100">
-                Retries left: {Math.max(0, (quizData.retries_left || 3) - (retryCounts[currentQ.id] || 0))}
+                Tries left: {Math.max(0, (quizData.settings?.per_question_retries || 3) - (retryCounts[currentQ.id] || 0))}
               </div>
             </div>
           </div>

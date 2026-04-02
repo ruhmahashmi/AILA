@@ -2515,7 +2515,8 @@ async def start_student_quiz(
                 "questions": [],
                 "settings": {
                     "feedback_style": feedback_style,
-                    "max_questions": max_q
+                    "max_questions": max_q,
+                    "per_question_retries": allowed_retries
                 },
                 "retries_left": max(0, allowed_retries - completed_attempts)
             }
@@ -2551,7 +2552,8 @@ async def start_student_quiz(
             ],
             "settings": {
                 "feedback_style": feedback_style,
-                "max_questions": max_q
+                "max_questions": max_q,
+                "per_question_retries": allowed_retries
             },
             "retries_left": max(0, allowed_retries - completed_attempts)
         }
@@ -2568,7 +2570,7 @@ async def start_student_quiz(
         return {
             "attempt_id": "error",
             "questions": [],
-            "settings": {"feedback_style": feedback_style, "max_questions": max_q},
+            "settings": {"feedback_style": feedback_style, "max_questions": max_q, "per_question_retries": allowed_retries},
             "retries_left": max(0, allowed_retries - completed_attempts)
         }
 
@@ -2633,7 +2635,8 @@ async def start_student_quiz(
         ],
         "settings": {
             "feedback_style": feedback_style,
-            "max_questions": max_q
+            "max_questions": max_q,
+            "per_question_retries": allowed_retries
         },
         "retries_left": max(0, allowed_retries - completed_attempts)
     }
