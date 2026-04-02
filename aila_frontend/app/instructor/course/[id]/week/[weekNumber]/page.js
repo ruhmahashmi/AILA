@@ -727,8 +727,11 @@ export default function CourseWeekPage({ params }) {
           <div className="bg-white rounded-2xl shadow-lg border border-gray-200 overflow-hidden relative">
               
               {/* Header */}
-              <div className="flex items-center gap-3">
-                <h3 className="font-semibold text-gray-800">🧠 Concept Map</h3>
+              <div className="flex items-center justify-between gap-3 px-5 py-3.5 border-b border-gray-100 bg-gradient-to-r from-indigo-50/60 to-white">
+                <div className="flex items-center gap-2">
+                  <span className="text-base">🧠</span>
+                  <h3 className="font-semibold text-gray-800 text-sm">Concept Map</h3>
+                </div>
                 
                 {availableGraphs.length > 1 && (
                     <select 
@@ -747,7 +750,7 @@ export default function CourseWeekPage({ params }) {
             </div>
 
               {/* Graph Container */}
-              <div className="h-[700px] relative bg-white rounded-xl overflow-hidden"> 
+              <div className="h-[700px] relative bg-white overflow-hidden"> 
                   {/* Loading Overlay */}
                   {processingFiles.length > 0 && knowledgeGraph.nodes.length > 0 && knowledgeGraph.nodes.length < 5 && (
                       <div className="absolute top-4 right-4 z-20 bg-white/90 backdrop-blur border border-blue-200 text-blue-700 px-3 py-1.5 rounded-full text-xs font-semibold shadow-sm flex items-center gap-2 animate-pulse transition-all">
@@ -775,9 +778,13 @@ export default function CourseWeekPage({ params }) {
           </div>
 
           {/* QUIZ CREATOR */}
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col overflow-hidden">
-            <div className="p-4 border-b bg-gray-50 font-bold text-gray-700">Create New Quiz</div>
-            <div className="p-4">
+          <div className="bg-white rounded-2xl shadow-lg border border-gray-200 flex flex-col overflow-hidden">
+            <div className="flex items-center gap-2 px-5 py-3.5 border-b border-gray-100 bg-gradient-to-r from-indigo-50/60 to-white">
+              <span className="text-base">✏️</span>
+              <h3 className="font-semibold text-gray-800 text-sm">Create New Quiz</h3>
+              <span className="ml-auto text-[11px] text-indigo-400 font-medium">Select concepts → AI suggests bundles</span>
+            </div>
+            <div className="p-5">
               <QuizCreator
                 key={`${courseId}-${weekNumber}`}
                 courseId={courseId}

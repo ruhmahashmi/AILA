@@ -310,10 +310,10 @@ export default function QuizCreator({ courseId, week, concepts = [], edges = [],
   }
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 lg:gap-8">
 
       {/* ── LEFT: Concept selection + name + create ── */}
-      <div className="lg:col-span-2 space-y-4">
+      <div className="lg:col-span-2 space-y-5">
 
         {/* Name row */}
         <div>
@@ -364,7 +364,7 @@ export default function QuizCreator({ courseId, week, concepts = [], edges = [],
             </div>
           </div>
 
-          <div className="flex flex-wrap gap-2 min-h-[48px] p-3 bg-gray-50 rounded-xl border border-gray-200">
+          <div className="flex flex-wrap gap-2 min-h-[60px] p-3.5 bg-gray-50 rounded-xl border border-gray-200">
             {selectableConcepts.length === 0 && (
               <p className="text-xs text-gray-400 italic w-full text-center py-2">
                 No concepts yet — upload slides first
@@ -408,10 +408,10 @@ export default function QuizCreator({ courseId, week, concepts = [], edges = [],
       </div>
 
       {/* ── RIGHT: AI Suggested Quizzes ── */}
-      <div className="space-y-3">
+      <div className="space-y-3 lg:border-l lg:border-gray-100 lg:pl-6">
         <div className="flex items-center justify-between">
           <div>
-            <p className="text-xs font-bold text-gray-500 uppercase">AI Suggestions</p>
+            <p className="text-xs font-bold text-gray-500 uppercase tracking-wide">AI Suggestions</p>
             <p className="text-[10px] text-gray-400 mt-0.5">Concepts that work well together</p>
           </div>
           {suggestions.length > 0 && (
@@ -425,7 +425,7 @@ export default function QuizCreator({ courseId, week, concepts = [], edges = [],
         </div>
 
         {showSuggestions && (
-          <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+          <div className="space-y-2 max-h-[360px] overflow-y-auto pr-1">
             {suggestions.length === 0 && (
               <div className="text-center py-8 text-gray-400 border-2 border-dashed border-gray-200 rounded-xl">
                 <p className="text-2xl mb-1">🤖</p>
