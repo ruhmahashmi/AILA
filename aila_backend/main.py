@@ -276,60 +276,118 @@ def identify_structure(llm, full_text, file_name):
     resp = llm.complete(prompt)
     return repair_json(str(resp))
 
-# --- HELPER: STEP 2 - CONCEPT EXTRACTION ---
-def extract_concepts(llm, structure, full_text):
-    main_topic = structure.get("main_topic", "Lecture")
-    sub_topics = structure.get("sub_topics", [])
-    
-    print(f"🧠 [PASS 2] Extracting consolidated concepts for: {sub_topics}")
-    
+# --- HELPER: STEP 2a - SINGLE SUB-TOPIC EXTRACTION ---
+def extract_concepts_for_subtopic(llm, main_topic, sub_topic, text_slice):
+    """
+    Extract concepts for ONE sub-topic from the relevant portion of text.
+    Called in parallel threads via ThreadPoolExecutor.
+    """
     prompt = f"""
     You are an expert Computer Science Curriculum Designer.
-    
-    TASK: Convert the lecture content for "{main_topic}" into a CLEAN, MINIMAL concept map.
-    
-    STRICT CONSTRAINT: You may generate AT MOST 4-6 concepts per sub-topic.
-    
+
+    TASK: Extract concepts for the sub-topic "{sub_topic}" within "{main_topic}".
+
+    STRICT CONSTRAINT: Generate AT MOST 4-6 nodes total.
+
     MERGE RULES (CRITICAL):
-    1. MERGE all "Operations" into ONE node.
-       - BAD: "Push", "Pop", "Peek", "Is_Empty" (4 nodes)
-       - GOOD: "Stack Operations" (1 node, summary mentions push/pop/peek)
-       
-    2. MERGE all "Implementation Details" into ONE node.
-       - BAD: "List Implementation", "Linked List Implementation", "O(1) Performance", "Top at End"
-       - GOOD: "Stack Implementation Strategies" (1 node, summary covers list/linked/complexity)
-       
-    3. MERGE all "Properties/Definitions" into ONE node.
-       - BAD: "LIFO", "Ordered Collection", "Reversal Property"
-       - GOOD: "Stack Properties" (1 node, summary explains LIFO)
+    1. MERGE all "Operations" into ONE node (e.g. "Stack Operations" not Push/Pop/Peek)
+    2. MERGE all "Implementation Details" into ONE node
+    3. MERGE all "Properties/Definitions" into ONE node
 
-    BANNED NODES:
-    - "Chapter Objectives", "Self Check", "Summary", "Introduction"
-    - "Methods Used", "Performance Impact" (Too generic)
-    - "What is a...?" (Questions are not concepts)
+    BANNED NODES: "Chapter Objectives", "Self Check", "Summary", "Introduction",
+    "Methods Used", "Performance Impact", questions ("What is...?")
 
-    Return JSON:
+    Edge relation must be one of:
+    is_a, has_part, uses, implements, requires, produces, example_of, contrasts_with, precedes
+
+    Return ONLY valid JSON:
     {{
-        "nodes": [ 
-            {{ 
-                "id": "StackOps", 
-                "label": "Stack Operations", 
-                "type": "structure", 
-                "summary": "Core methods: push, pop, peek, size, is_empty.", 
-                "slide_nums": [3,4,5] 
-            }} 
+        "nodes": [
+            {{
+                "id": "UniqueSnakeCaseId",
+                "label": "Human Readable Label",
+                "type": "algorithm|structure|concept|detail|example",
+                "summary": "One sentence describing this concept.",
+                "slide_nums": [3, 4]
+            }}
         ],
         "edges": [
-            {{ "source": "{main_topic}", "target": "StackOps", "relation": "defines behavior" }}
+            {{ "source": "{sub_topic}", "target": "UniqueSnakeCaseId", "relation": "has_part" }}
         ]
     }}
-    
-    Context:
-    {full_text}
+
+    Context (focus only on "{sub_topic}"):
+    {text_slice[:12000]}
     """
-    
     resp = llm.complete(prompt)
-    return repair_json(str(resp))
+    result = repair_json(str(resp))
+    print(f"  ✓ [{sub_topic}] → {len(result.get('nodes', []))} nodes, {len(result.get('edges', []))} edges")
+    return result
+
+
+# --- HELPER: STEP 2 - CONCEPT EXTRACTION (parallel per sub-topic) ---
+def extract_concepts(llm, structure, full_text):
+    main_topic = structure.get("main_topic", "Lecture")
+    sub_topics  = structure.get("sub_topics", [])
+
+    print(f"🧠 [PASS 2] Extracting concepts for {len(sub_topics)} sub-topics in parallel...")
+
+    if not sub_topics:
+        # Fallback: single-call extraction if no sub-topics were identified
+        sub_topics = [main_topic]
+
+    # Build per-sub-topic text slices by keyword search in full_text
+    def get_relevant_slice(text, keyword, window=8000):
+        """Return the portion of text most relevant to the keyword."""
+        idx = text.lower().find(keyword.lower())
+        if idx == -1:
+            return text  # keyword not found — give the whole text
+        start = max(0, idx - 500)
+        return text[start: start + window]
+
+    # Run extractions in parallel (one thread per sub-topic)
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    results_by_topic = {}
+    with ThreadPoolExecutor(max_workers=min(len(sub_topics), 5)) as pool:
+        future_to_topic = {
+            pool.submit(extract_concepts_for_subtopic, llm, main_topic, st, get_relevant_slice(full_text, st)): st
+            for st in sub_topics
+        }
+        for future in as_completed(future_to_topic):
+            st = future_to_topic[future]
+            try:
+                results_by_topic[st] = future.result()
+            except Exception as e:
+                print(f"  ✗ [{st}] extraction failed: {e}")
+                results_by_topic[st] = {"nodes": [], "edges": []}
+
+    # Merge all sub-topic results into one graph dict
+    merged_nodes, merged_edges = [], []
+    seen_node_ids = set()
+    for st, data in results_by_topic.items():
+        for node in data.get("nodes", []):
+            nid = node.get("id", "")
+            if nid and nid not in seen_node_ids:
+                seen_node_ids.add(nid)
+                merged_nodes.append(node)
+        # Add edge from main_topic → sub_topic root if not already present
+        merged_edges.extend(data.get("edges", []))
+        # Connect sub_topic to main_topic
+        if st != main_topic:
+            merged_edges.append({"source": main_topic, "target": st, "relation": "has_part"})
+
+    # Ensure main_topic root node exists
+    if main_topic not in seen_node_ids:
+        merged_nodes.insert(0, {
+            "id": main_topic,
+            "label": main_topic,
+            "type": "root",
+            "summary": f"Main topic: {main_topic}",
+            "slide_nums": []
+        })
+
+    print(f"📊 [PASS 2 DONE] {len(merged_nodes)} total nodes, {len(merged_edges)} edges across {len(sub_topics)} sub-topics")
+    return {"nodes": merged_nodes, "edges": merged_edges}
 
 
 # --- MAIN PIPELINE FUNCTION ---
