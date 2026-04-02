@@ -330,16 +330,29 @@ export default function StudentCourseWeekPage({ params }) {
             <div className="bg-blue-600 h-2 rounded-full transition-all duration-300" style={{ width: `${progress}%` }}></div>
           </div>
           {adaptiveBloom && (
-            <div className="mb-5 px-4 py-2 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-sm flex items-center gap-2">
+            <div className="mb-5 px-4 py-2.5 rounded-lg bg-indigo-50 border border-indigo-200 text-indigo-800 text-sm flex items-center gap-2">
               <span>🎯</span>
-              <span>Targeting <strong>{adaptiveBloom.recommended_bloom_level}</strong> questions based on your performance</span>
+              <span>{adaptiveBloom.message}</span>
             </div>
           )}
           <div className="bg-white p-8 rounded-3xl shadow-sm border border-gray-200 min-h-[400px] flex flex-col">
             <div className="flex-1">
               <div className="flex items-center gap-2 mb-4">
-                <span className={`badge badge-difficulty ${(currentQ.difficulty || 'Medium').toLowerCase()}`}>{currentQ.difficulty || "Medium"}</span>
-                <span className="badge badge-bloom">Bloom: {currentQ.bloom_level || "Remember"}</span>
+                {/* Difficulty badge */}
+                <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold uppercase tracking-wide ${
+                  (currentQ.difficulty || 'medium').toLowerCase() === 'easy' ? 'bg-emerald-100 text-emerald-700' :
+                  (currentQ.difficulty || 'medium').toLowerCase() === 'hard' ? 'bg-red-100 text-red-700' :
+                  'bg-amber-100 text-amber-700'
+                }`}>{currentQ.difficulty || "Medium"}</span>
+                {/* Bloom badge — glows when it matches the adaptive target */}
+                <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold ${
+                  adaptiveBloom && currentQ.bloom_level === adaptiveBloom.recommended_bloom_level
+                    ? 'bg-indigo-600 text-white ring-2 ring-indigo-300 ring-offset-1'
+                    : 'bg-indigo-50 text-indigo-600 border border-indigo-200'
+                }`}>
+                  {adaptiveBloom && currentQ.bloom_level === adaptiveBloom.recommended_bloom_level && <span>🎯</span>}
+                  {currentQ.bloom_level || "Remember"}
+                </span>
               </div>
               <h2 className="text-xl font-semibold text-gray-900 mb-6 leading-relaxed">{currentQ.question}</h2>
               <div className="space-y-3">

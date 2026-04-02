@@ -3177,17 +3177,29 @@ def get_adaptive_bloom(student_id: str, quiz_id: str, db: Session = Depends(get_
     if recommended is None:
         recommended = allowed_levels[-1]
 
+    # Determine if this is truly a first attempt (no history at all)
+    total_answered = sum(d["total"] for d in bloom_performance.values())
+    is_first_attempt = (total_answered == 0)
+
     # Build message
     recommended_idx = bloom_levels.index(recommended)
-    if recommended_idx > 0:
-        prev_level = bloom_levels[recommended_idx - 1]
-        message = f"Targeting {recommended} — keep practicing {prev_level}"
+    perf = bloom_performance[recommended]
+
+    if is_first_attempt:
+        message = f"Starting at {recommended} — questions will adapt as you progress"
+    elif perf["total"] == 0:
+        # Haven't been tested at this level yet
+        message = f"Moving up to {recommended} — you haven't been tested here yet"
+    elif perf["pct"] < 75.0:
+        pct = int(perf["pct"])
+        message = f"Practicing {recommended} — {pct}% accuracy so far (need 75% to advance)"
     else:
-        message = f"Targeting {recommended} — great starting point!"
+        message = f"Mastered through {recommended} — keep it up!"
 
     return {
         "recommended_bloom_level": recommended,
         "bloom_performance": bloom_performance,
+        "is_first_attempt": is_first_attempt,
         "message": message,
     }
 
