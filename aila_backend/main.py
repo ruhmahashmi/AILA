@@ -255,29 +255,36 @@ def identify_structure(llm, full_text, file_name):
     print(f"🧠 [PASS 1] Identifying structure for {file_name}...")
 
     prompt = f"""
-    Analyze lecture slides "{file_name}".
+    Analyze the lecture slides below from "{file_name}".
 
-    GOAL: Identify the main topic and every distinct top-level sub-topic.
+    GOAL: Identify the main topic and every distinct top-level sub-topic DIRECTLY from the slide content.
 
     CRITICAL RULES:
-    1. Sub-topics must be the CORE NAMED CONCEPTS, not examples or details.
-       - Lecture "4 Principles of OOP" → sub_topics: ["Encapsulation", "Inheritance", "Polymorphism", "Abstraction"]
-       - Lecture "Stacks and Queues" → sub_topics: ["Stacks", "Queues"]
-       - Lecture "Sorting Algorithms" → sub_topics: ["Bubble Sort", "Merge Sort", "Quick Sort"]
-    2. NEVER use examples, code snippets, or slides as sub-topics.
-    3. NEVER list "Introduction", "Summary", "Overview", "Review" as sub-topics.
-    4. For each sub-topic, find the slide numbers where it is PRIMARILY discussed.
+    1. Read the actual slide headings, section titles, and structure to determine sub-topics.
+       Do NOT guess based on the lecture title — extract what is ACTUALLY in the slides.
+    2. Sub-topics must be the CORE NAMED CONCEPTS that the lecture explicitly covers.
+       The number of sub-topics should match what is genuinely in the slides (could be 2, could be 8).
+    3. NEVER use examples, code snippets, or implementation details as sub-topics.
+    4. NEVER list "Introduction", "Summary", "Overview", "Review", "Conclusion" as sub-topics.
+    5. For each sub-topic, record the slide numbers where it is PRIMARILY discussed.
+
+    Examples of correct extraction across different domains:
+    - Slides on networking protocols → sub_topics: ["TCP/IP", "UDP", "HTTP", "DNS"]
+    - Slides on cellular biology → sub_topics: ["Cell Membrane", "Mitochondria", "Nucleus", "Ribosomes"]
+    - Slides on linear algebra → sub_topics: ["Vectors", "Matrix Multiplication", "Eigenvalues"]
+    - Slides on sorting algorithms → sub_topics: ["Bubble Sort", "Merge Sort", "Quick Sort"]
+    The point: sub-topics come FROM THE CONTENT, not from assumptions about the subject area.
 
     Return JSON (no extra text, no markdown):
     {{
-        "main_topic": "The single overarching subject (e.g. Object-Oriented Programming)",
+        "main_topic": "The single overarching subject exactly as presented in the slides",
         "sub_topics": [
-            {{"name": "Encapsulation", "slide_nums": [3, 4, 5]}},
-            {{"name": "Inheritance",   "slide_nums": [6, 7, 8]}}
+            {{"name": "<exact name from slide content>", "slide_nums": [3, 4, 5]}},
+            {{"name": "<exact name from slide content>", "slide_nums": [6, 7]}}
         ]
     }}
 
-    Context:
+    Slide content:
     {full_text[:16000]}
     """
 
@@ -303,20 +310,22 @@ def extract_concepts_for_subtopic(llm, main_topic, sub_topic_name, sub_topic_id,
     The LLM only needs to return CHILDREN of that node.
     """
     prompt = f"""
-    You are an expert Computer Science Curriculum Designer.
+    You are an expert educator building a concept map.
 
     CONTEXT: We are building a concept map for "{main_topic}".
     The sub-topic "{sub_topic_name}" is already a node.
-    Your job: find its KEY CHILD CONCEPTS only.
+    Your job: find its KEY CHILD CONCEPTS based ONLY on the lecture text provided below.
 
     RULES:
-    1. Return 2-4 child concepts MAX. These must be direct sub-concepts of "{sub_topic_name}".
+    1. Return 2-5 child concepts. These must be direct sub-concepts of "{sub_topic_name}" as taught in THIS lecture.
     2. Children must be CONCEPTUAL (definitions, mechanisms, properties) — NOT examples, NOT code.
-       - GOOD child of "Encapsulation": "Access Modifiers", "Data Hiding", "Getter/Setter Methods"
-       - BAD child of "Encapsulation": "BankAccount class", "private int balance", "Python example"
-    3. MERGE related details into one node:
-       - BAD: "public", "private", "protected" (3 nodes) → GOOD: "Access Modifiers" (1 node)
-    4. BANNED: "Introduction", "Summary", "Example", "Overview", "Review", code literals.
+       Examples of what NOT to do (across domains):
+       - BAD: "BankAccount class", "private int balance", "Python example" (these are code/examples)
+       - BAD: "Figure 3", "slide 5 diagram", "see lecture notes" (these are references)
+       GOOD children describe the concept's components, properties, or mechanisms as stated in the slides.
+    3. MERGE related micro-details into one node:
+       - BAD: three separate nodes for each bullet point → GOOD: one node capturing the underlying concept
+    4. BANNED node labels: "Introduction", "Summary", "Example", "Overview", "Review", any code literal.
     5. Edge relation must be one of:
        is_a, has_part, uses, implements, requires, produces, example_of, contrasts_with, precedes
 
