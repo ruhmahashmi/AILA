@@ -270,7 +270,7 @@ def identify_structure(llm, full_text, file_name):
     }}
     
     Context:
-    {full_text[:15000]} 
+    {full_text[:16000]} 
     """
     
     resp = llm.complete(prompt)
@@ -325,7 +325,7 @@ def extract_concepts(llm, structure, full_text):
     }}
     
     Context:
-    {full_text[:25000]}
+    {full_text}
     """
     
     resp = llm.complete(prompt)
@@ -417,11 +417,31 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
             db.add(new_seg)
         db.commit()
 
-        # Prepare Text (With Chunking Safety Check)
-        full_text = "\n\n".join([f"--- Slide {s['slide_num']} ---\n{s['text']}" for s in segments_data])
-        if len(full_text) > 30000:
-            print("⚠️ [WARN] Text > 30k chars. Truncating safely.")
-            full_text = full_text[:30000]
+        # Prepare Text — slide-boundary-aware truncation
+        # Each slide is formatted with its real title so the LLM can see headings.
+        def smart_truncate(segments, char_limit=28000):
+            """Pack whole slides up to char_limit. Never cuts mid-slide."""
+            budget = char_limit
+            chunks = []
+            for s in segments:
+                slide_title = s.get("title", f"Slide {s['slide_num']}")
+                block = f"--- {slide_title} (Slide {s['slide_num']}) ---\n{s['text']}"
+                if len(block) > budget:
+                    # If we have nothing yet, include a truncated version of the first slide
+                    # rather than sending an empty string
+                    if not chunks:
+                        chunks.append(block[:budget])
+                    break
+                chunks.append(block)
+                budget -= len(block)
+            return "\n\n".join(chunks)
+
+        full_text = smart_truncate(segments_data)
+        total_chars = sum(len(s["text"]) for s in segments_data)
+        if total_chars > 28000:
+            covered = len(segments_data[:len(full_text.split("--- ")) - 1])
+            print(f"⚠️ [WARN] Lecture {total_chars} chars. Fitting {len(full_text)} chars into LLM window (slide-boundary safe).")
+        print(f"📄 [TEXT] {len(full_text)} chars across {len(segments_data)} slides")
 
         # ---------- 2. TWO-PASS GENERATION ----------
         
