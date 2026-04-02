@@ -774,30 +774,19 @@ export default function CourseWeekPage({ params }) {
               </div>
           </div>
 
-          {/* REST OF PAGE */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 h-[700px]">
-             {/* LEFT: Concept Details */}
-             <div className="bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col overflow-hidden">
-                <div className="p-4 border-b bg-gray-50 font-bold text-gray-700">Concept Details</div>
-                <div className="flex-1 overflow-y-auto p-4">
-                   <SlideViewer concept={activeConcept} courseId={courseId} week={weekNumber} />
-                </div>
-             </div>
-
-             {/* RIGHT: Quiz Creator */}
-             <div className="bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col overflow-hidden">
-                <div className="p-4 border-b bg-gray-50 font-bold text-gray-700">Create New Quiz</div>
-                <div className="flex-1 overflow-y-auto p-4">
-                  <QuizCreator
-                    key={`${courseId}-${weekNumber}`}
-                    courseId={courseId}
-                    week={Number(weekNumber)}
-                    concepts={knowledgeGraph.nodes}
-                    onQuizCreated={fetchQuizzes}
-                    onConceptClick={handleConceptSelect}
-                  />
-                </div>
-             </div>
+          {/* QUIZ CREATOR */}
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col overflow-hidden">
+            <div className="p-4 border-b bg-gray-50 font-bold text-gray-700">Create New Quiz</div>
+            <div className="p-4">
+              <QuizCreator
+                key={`${courseId}-${weekNumber}`}
+                courseId={courseId}
+                week={Number(weekNumber)}
+                concepts={knowledgeGraph.nodes}
+                onQuizCreated={fetchQuizzes}
+                onConceptClick={handleConceptSelect}
+              />
+            </div>
           </div>
 
           {/* QUIZ MANAGER SECTION */}
@@ -919,13 +908,6 @@ export default function CourseWeekPage({ params }) {
                        </div>
                        
                        <div className="flex gap-3 pt-2 border-t border-gray-100">
-                          <button 
-                            onClick={generateQuizMCQs}
-                            disabled={loadingPreview}
-                            className="flex-1 bg-green-600 text-white py-2 rounded-lg text-sm font-semibold hover:bg-green-700 disabled:opacity-50 shadow-sm transition-colors flex items-center justify-center gap-2"
-                          >
-                            {loadingPreview ? "Generating..." : "✨ Generate / Add More Questions"}
-                          </button>
                           <button 
                             onClick={loadPreview}
                             className="px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-50 transition-colors font-medium flex items-center gap-2"
