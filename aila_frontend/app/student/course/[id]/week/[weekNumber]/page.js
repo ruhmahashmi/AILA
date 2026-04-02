@@ -308,7 +308,40 @@ export default function StudentCourseWeekPage({ params }) {
       );
     }
 
+    // Guard: no questions in this quiz (no MCQs generated yet, or all filtered out)
+    if (!quizData.questions || quizData.questions.length === 0) {
+      return (
+        <div className="min-h-screen bg-gray-50 flex items-center justify-center p-8">
+          <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-10 max-w-md w-full text-center space-y-4">
+            <div className="text-4xl">📭</div>
+            <h2 className="text-lg font-semibold text-gray-900">No questions available</h2>
+            <p className="text-sm text-gray-500">The instructor hasn't generated questions for this quiz yet. Check back soon.</p>
+            <button onClick={handleBackToList} className="px-6 py-2.5 bg-gray-900 text-white font-medium rounded-xl hover:bg-black transition-colors">
+              Back to Quizzes
+            </button>
+          </div>
+        </div>
+      );
+    }
+
     const currentQ = quizData.questions[currentQuestionIndex];
+
+    // Guard: index out of bounds (shouldn't normally happen, but safe)
+    if (!currentQ) {
+      return (
+        <div className="min-h-screen bg-gray-50 flex items-center justify-center p-8">
+          <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-10 max-w-md w-full text-center space-y-4">
+            <div className="text-4xl">⚠️</div>
+            <h2 className="text-lg font-semibold text-gray-900">Question not found</h2>
+            <p className="text-sm text-gray-500">Something went wrong loading this question.</p>
+            <button onClick={handleBackToList} className="px-6 py-2.5 bg-gray-900 text-white font-medium rounded-xl hover:bg-black transition-colors">
+              Back to Quizzes
+            </button>
+          </div>
+        </div>
+      );
+    }
+
     const isLastQuestion = currentQuestionIndex === quizData.questions.length - 1;
     const progress = ((currentQuestionIndex + 1) / quizData.questions.length) * 100;
 
