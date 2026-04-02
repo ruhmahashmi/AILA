@@ -2506,38 +2506,53 @@ async def start_student_quiz(
 
     # 3. Resume existing attempt if present
     if active_attempt:
-        valid_mcqs, all_mcqs = get_filtered_mcqs()
-        target_pool = valid_mcqs if valid_mcqs else all_mcqs
+        # Check if we already stored the question list for this attempt
+        stored_meta = active_attempt.responses or {}
+        stored_q_ids = stored_meta.get("__question_ids__", [])
 
-        if not target_pool:
-            return {
-                "attempt_id": active_attempt.id,
-                "questions": [],
-                "settings": {
-                    "feedback_style": feedback_style,
-                    "max_questions": max_q,
-                    "per_question_retries": allowed_retries
-                },
-                "retries_left": max(0, allowed_retries - completed_attempts)
-            }
-
-        if adaptive_target_bloom:
-            target_idx = BLOOM_LEVELS.index(adaptive_target_bloom)
-            target_bloom_mcqs = [m for m in target_pool
-                                  if (m.bloom_level or "Remember") == adaptive_target_bloom]
-            below_target_mcqs = [m for m in target_pool
-                                  if (m.bloom_level or "Remember") in BLOOM_LEVELS[:target_idx]]
-            random.shuffle(target_bloom_mcqs)
-            random.shuffle(below_target_mcqs)
-            target_count = min(len(target_bloom_mcqs), max(1, int(max_q * 0.7)))
-            below_count  = min(len(below_target_mcqs), max_q - target_count)
-            ordered_pool = target_bloom_mcqs[:target_count] + below_target_mcqs[:below_count]
-            if len(ordered_pool) < max_q:
-                remaining = [m for m in target_bloom_mcqs if m not in ordered_pool]
-                ordered_pool += remaining[:max_q - len(ordered_pool)]
-            selected_mcqs = ordered_pool[:max_q]
+        if stored_q_ids:
+            # Restore the exact same question order from when the attempt was created
+            id_to_mcq = {m.id: m for m in db.query(MCQ).filter(MCQ.id.in_(stored_q_ids)).all()}
+            selected_mcqs = [id_to_mcq[qid] for qid in stored_q_ids if qid in id_to_mcq]
         else:
-            selected_mcqs = random.sample(target_pool, min(len(target_pool), max_q))
+            # Legacy resume: no stored IDs — re-select and save them
+            valid_mcqs, all_mcqs = get_filtered_mcqs()
+            target_pool = valid_mcqs if valid_mcqs else all_mcqs
+
+            if not target_pool:
+                return {
+                    "attempt_id": active_attempt.id,
+                    "questions": [],
+                    "settings": {
+                        "feedback_style": feedback_style,
+                        "max_questions": max_q,
+                        "per_question_retries": allowed_retries
+                    },
+                    "retries_left": max(0, allowed_retries - completed_attempts)
+                }
+
+            if adaptive_target_bloom:
+                target_idx = BLOOM_LEVELS.index(adaptive_target_bloom)
+                target_bloom_mcqs = [m for m in target_pool
+                                      if (m.bloom_level or "Remember") == adaptive_target_bloom]
+                below_target_mcqs = [m for m in target_pool
+                                      if (m.bloom_level or "Remember") in BLOOM_LEVELS[:target_idx]]
+                random.shuffle(target_bloom_mcqs)
+                random.shuffle(below_target_mcqs)
+                target_count = min(len(target_bloom_mcqs), max(1, int(max_q * 0.7)))
+                below_count  = min(len(below_target_mcqs), max_q - target_count)
+                ordered_pool = target_bloom_mcqs[:target_count] + below_target_mcqs[:below_count]
+                if len(ordered_pool) < max_q:
+                    remaining = [m for m in target_bloom_mcqs if m not in ordered_pool]
+                    ordered_pool += remaining[:max_q - len(ordered_pool)]
+                selected_mcqs = ordered_pool[:max_q]
+            else:
+                selected_mcqs = random.sample(target_pool, min(len(target_pool), max_q))
+
+            # Save question IDs for stable resume next time
+            stored_meta["__question_ids__"] = [m.id for m in selected_mcqs]
+            active_attempt.responses = stored_meta
+            db.commit()
 
         return {
             "attempt_id": active_attempt.id,
@@ -2617,7 +2632,9 @@ async def start_student_quiz(
         student_id=student_id,
         score=0,
         total_questions=0,
-        completed=False
+        completed=False,
+        # Store question IDs so resume always shows the exact same question set
+        responses={"__question_ids__": [m.id for m in selected_mcqs]}
     )
     db.add(new_attempt)
     db.commit()
@@ -2847,20 +2864,14 @@ async def check_answer_mcq(
     if not mcq:
         raise HTTPException(status_code=404, detail="Question not found")
 
-    settings = None
-    try:
-        settings = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
-    except AttributeError:
-        settings = db.query(QuizSettings).filter(QuizSettings.quizid == quiz_id).first()
+    settings = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
 
-    def get_setting(obj, name, default):
-        if not obj: return default
-        val = getattr(obj, name, getattr(obj, name.replace("feedback", "feedback_").replace("allowed", "allowed_"), None))
-        return val if val is not None else default
-
-    raw_style = get_setting(settings, 'feedbackstyle', "Immediate")
+    # Read directly from the correct DB column names
+    raw_style = (settings.feedback_style if settings and settings.feedback_style else "Immediate")
     style = raw_style.lower().strip()
-    max_retries = get_setting(settings, 'allowedretries', 3)
+    # per_question_retries: how many tries a student gets per individual question
+    # In QuizSettings this is stored as allowed_retries
+    max_retries = int(settings.allowed_retries) if settings and settings.allowed_retries else 3
 
     stored_ans = (mcq.answer or "").strip()
     user_ans = (selected_opt or "").strip()
