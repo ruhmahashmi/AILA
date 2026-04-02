@@ -352,15 +352,50 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
             doc = fitz.open(filepath)
             for i, page in enumerate(doc):
                 text = page.get_text(sort=True)
-                if text.strip():
-                    segments_data.append({"slide_num": i + 1, "text": text})
+                if not text.strip():
+                    continue
+                # Extract title: largest-font span on the page
+                page_title = f"Slide {i + 1}"
+                try:
+                    blocks = page.get_text("dict")["blocks"]
+                    spans = [
+                        s for b in blocks
+                        for l in b.get("lines", [])
+                        for s in l.get("spans", [])
+                        if s.get("text", "").strip()
+                    ]
+                    if spans:
+                        biggest = max(spans, key=lambda s: s["size"])
+                        candidate = biggest["text"].strip()
+                        if len(candidate) > 3:  # ignore single chars / page numbers
+                            page_title = candidate
+                except Exception:
+                    pass
+                segments_data.append({"slide_num": i + 1, "text": text, "title": page_title})
         elif ext == ".pptx":
             prs = Presentation(filepath)
             for i, slide in enumerate(prs.slides):
-                lines = [shape.text for shape in slide.shapes if hasattr(shape, "text")]
+                slide_title = f"Slide {i + 1}"
+                lines = []
+                for shape in slide.shapes:
+                    # Extract title from the first non-empty text frame
+                    if hasattr(shape, "text") and shape.text.strip():
+                        if slide_title == f"Slide {i + 1}":  # not yet set
+                            slide_title = shape.text.strip().splitlines()[0][:120]
+                        lines.append(shape.text)
+                    # Also extract table cells
+                    if shape.has_table:
+                        for row_idx in range(shape.table.rows.count):
+                            row_cells = [
+                                shape.table.cell(row_idx, c).text.strip()
+                                for c in range(shape.table.columns.count)
+                            ]
+                            row_text = "\t".join(cell for cell in row_cells if cell)
+                            if row_text:
+                                lines.append(row_text)
                 content = "\n".join(lines)
                 if content.strip():
-                    segments_data.append({"slide_num": i + 1, "text": content})
+                    segments_data.append({"slide_num": i + 1, "text": content, "title": slide_title})
 
         if not segments_data:
             raise ValueError("No readable slides found")
@@ -374,7 +409,7 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
                 course_id=course_id,
                 week=week,
                 segment_index=seg["slide_num"],
-                title=f"Slide {seg['slide_num']}", 
+                title=seg.get("title", f"Slide {seg['slide_num']}"),  # real title now
                 content=seg["text"],
                 keywords="", 
                 summary=""
