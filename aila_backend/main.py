@@ -708,21 +708,51 @@ def compute_levels(nodes, edges, explicit_root=None):
                 visited.add(child)
                 queue.append((child, depth + 1))
 
-    # 5. Rescue Orphans (But try to attach to NEAREST sibling first?)
-    # For now, stick to Root attach, but since we fixed the edges above, 
-    # fewer nodes should be orphans.
+    # 5. Rescue Orphans — try semantic parent first, fall back to root
+    # Build list of already-reachable nodes for similarity comparison
+    reachable_nodes = [n for n in nodes if levels.get(n["id"], -1) != -1]
+
     new_edges = []
     if explicit_root:
         for node in nodes:
             nid = node["id"]
-            if nid != explicit_root and levels[nid] == -1:
-                new_edges.append({
-                    "source": explicit_root,
-                    "target": nid,
-                    "relation": "related concept"
-                })
-                levels[nid] = 1
-                node["isRoot"] = False
+            if nid == explicit_root or levels.get(nid, -1) != -1:
+                continue  # already placed
+
+            orphan_label = node.get("label", nid)
+
+            # Try to find the best semantic parent among reachable nodes
+            best_parent_id = explicit_root  # default fallback
+            best_score = 0.0
+            for candidate in reachable_nodes:
+                if candidate["id"] == explicit_root:
+                    continue
+                candidate_label = candidate.get("label", candidate["id"])
+                from difflib import SequenceMatcher
+                score = SequenceMatcher(
+                    None,
+                    _normalize_label(orphan_label),
+                    _normalize_label(candidate_label)
+                ).ratio()
+                if score > best_score:
+                    best_score = score
+                    best_parent_id = candidate["id"]
+
+            # Only use the semantic parent if it's a reasonable match
+            # (threshold 0.4 — loose, just avoids completely unrelated attachment)
+            if best_score < 0.4:
+                best_parent_id = explicit_root
+
+            parent_level = levels.get(best_parent_id, 0)
+            new_edges.append({
+                "source": best_parent_id,
+                "target": nid,
+                "relation": "related"
+            })
+            levels[nid] = parent_level + 1
+            node["isRoot"] = False
+            # Add to reachable so subsequent orphans can attach to this one
+            reachable_nodes.append(node)
 
     # 6. Finalize
     for node in nodes:
