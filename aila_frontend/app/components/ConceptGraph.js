@@ -37,55 +37,54 @@ const TYPE_LABELS = {
 // --- CUSTOM NODE: "Concept Card" ---
 const ConceptNode = ({ data }) => {
   const typeKey = data.isRoot ? 'root' : (data.type || 'concept');
-  const styles = TYPE_STYLES[typeKey] || TYPE_STYLES.concept;
-  const labelLen = (data.label || '').length;
-  const minW = Math.max(150, labelLen * 8 + 32);
+  const styles  = TYPE_STYLES[typeKey] || TYPE_STYLES.concept;
+  const width   = getNodeWidth(data.label || '');
 
-  // slide_depth visual treatment:
-  //   1 = dedicated section  → solid border, full opacity (from slides)
-  //   2 = only mentioned     → solid border, slight fade (partially in slides)
-  //   3 = not in slides      → dashed border, faded (pure domain knowledge)
   const depth = data.slide_depth || (data.inferred ? 3 : 1);
-  const depthStyle = depth === 3
-    ? 'border-dashed opacity-75'
+  const depthStyle = depth === 3 ? 'border-dashed opacity-80' : 'border-solid';
+
+  // Compact single badge line: type + coverage + quiz
+  const coverageBadge = depth === 3
+    ? <span className="text-[9px] bg-amber-100 text-amber-700 font-semibold px-1.5 py-0.5 rounded-full">★ AI</span>
     : depth === 2
-      ? 'border-solid opacity-90'
-      : 'border-solid';
+      ? <span className="text-[9px] bg-sky-100 text-sky-700 font-semibold px-1.5 py-0.5 rounded-full">~</span>
+      : null;
 
   return (
     <div
-      className={`px-4 py-3 shadow-md rounded-xl border-2 text-center transition-all cursor-pointer hover:shadow-lg ${styles.card} ${depthStyle}`}
-      style={{ minWidth: minW }}
+      className={`px-3 py-2.5 shadow-md rounded-xl border-2 text-center transition-all
+        cursor-pointer hover:shadow-lg hover:scale-[1.02] ${styles.card} ${depthStyle}`}
+      style={{ width, minWidth: width, maxWidth: width }}
     >
-      <Handle type="target" position={Position.Top} className="!bg-slate-400 !w-2 !h-2" />
+      <Handle type="target" position={Position.Top}
+        className="!bg-slate-400 !w-2 !h-2 !-top-1" />
 
-      <div className="font-bold text-sm mb-1 leading-snug">{data.label}</div>
+      {/* Label */}
+      <div className="font-semibold text-[13px] leading-tight">{data.label}</div>
 
+      {/* Badge row — single line, no stacking */}
+      {!data.isRoot && (
+        <div className="flex items-center justify-center gap-1 mt-1.5 flex-wrap">
+          {styles.badge && (
+            <span className={`text-[9px] uppercase tracking-widest font-semibold
+              px-1.5 py-0.5 rounded-full ${styles.badge}`}>
+              {TYPE_LABELS[typeKey] || typeKey}
+            </span>
+          )}
+          {coverageBadge}
+          {data.quizCount > 0 && (
+            <span className="text-[9px] bg-amber-400 text-amber-900 font-bold px-1.5 py-0.5 rounded-full">
+              {data.quizCount}Q
+            </span>
+          )}
+        </div>
+      )}
       {data.isRoot && (
-        <div className="text-[10px] uppercase tracking-wider opacity-80">Main Topic</div>
-      )}
-      {!data.isRoot && styles.badge && (
-        <div className={`text-[9px] uppercase tracking-widest font-semibold px-2 py-0.5 rounded-full inline-block mt-1 ${styles.badge}`}>
-          {TYPE_LABELS[typeKey] || typeKey}
-        </div>
-      )}
-      {depth === 3 && (
-        <div className="text-[9px] mt-1 bg-amber-100 text-amber-700 font-semibold px-2 py-0.5 rounded-full inline-block">
-          ★ inferred
-        </div>
-      )}
-      {depth === 2 && (
-        <div className="text-[9px] mt-1 bg-sky-100 text-sky-700 font-semibold px-2 py-0.5 rounded-full inline-block">
-          mentioned
-        </div>
-      )}
-      {data.quizCount > 0 && (
-        <div className="text-[9px] mt-1 bg-amber-400 text-amber-900 font-bold px-1.5 py-0.5 rounded-full inline-block ml-1">
-          {data.quizCount}Q
-        </div>
+        <div className="text-[10px] uppercase tracking-wider opacity-70 mt-0.5">Main Topic</div>
       )}
 
-      <Handle type="source" position={Position.Bottom} className="!bg-slate-400 !w-2 !h-2" />
+      <Handle type="source" position={Position.Bottom}
+        className="!bg-slate-400 !w-2 !h-2 !-bottom-1" />
     </div>
   );
 };
@@ -126,19 +125,28 @@ const GraphLegend = () => (
 
 const nodeTypes = { concept: ConceptNode };
 
+// Node dimensions — must match exactly what dagre uses for spacing
+const NODE_HEIGHT = 72;
+const getNodeWidth = (label = '') => Math.max(160, label.length * 9 + 48);
+
 // --- LAYOUT ENGINE (DAGRE) ---
 const getLayoutedElements = (nodes, edges, direction = 'TB') => {
   const dagreGraph = new dagre.graphlib.Graph();
   dagreGraph.setDefaultEdgeLabel(() => ({}));
 
   const isHorizontal = direction === 'LR';
-  dagreGraph.setGraph({ rankdir: direction });
+  dagreGraph.setGraph({
+    rankdir:  direction,
+    ranksep:  120,   // vertical gap between levels (was ~40 default)
+    nodesep:  80,    // horizontal gap between nodes on same level
+    edgesep:  40,    // min gap between edges
+    marginx:  40,
+    marginy:  40,
+  });
 
   nodes.forEach((node) => {
-    // Dynamic width based on label length (~8px per char + padding)
-    const labelLen = (node.data?.label || node.id || '').length;
-    const nodeWidth = Math.max(180, labelLen * 8 + 32);
-    dagreGraph.setNode(node.id, { width: nodeWidth, height: 80 });
+    const w = getNodeWidth(node.data?.label || node.id || '');
+    dagreGraph.setNode(node.id, { width: w, height: NODE_HEIGHT });
   });
 
   edges.forEach((edge) => {
@@ -148,15 +156,16 @@ const getLayoutedElements = (nodes, edges, direction = 'TB') => {
   dagre.layout(dagreGraph);
 
   const layoutedNodes = nodes.map((node) => {
-    const nodeWithPosition = dagreGraph.node(node.id);
+    const pos = dagreGraph.node(node.id);
+    const w   = getNodeWidth(node.data?.label || node.id || '');
     return {
       ...node,
-      targetPosition: isHorizontal ? 'left' : 'top',
+      targetPosition: isHorizontal ? 'left'  : 'top',
       sourcePosition: isHorizontal ? 'right' : 'bottom',
-      // Shift position to center (Dagre gives center, React Flow needs top-left)
+      // Dagre gives center-x/center-y; React Flow needs top-left corner
       position: {
-        x: nodeWithPosition.x - 90,
-        y: nodeWithPosition.y - 40,
+        x: pos.x - w / 2,
+        y: pos.y - NODE_HEIGHT / 2,
       },
     };
   });
@@ -191,19 +200,45 @@ export default function ConceptGraph({ nodes = [], edges = [], onSelect }) {
       position: { x: 0, y: 0 } // Placeholder, will be fixed by dagre
     }));
 
-    const initialEdges = edges.map((e, i) => ({
-      id: `e${i}`,
-      source: typeof e.source === 'object' ? e.source.id : e.source,
-      target: typeof e.target === 'object' ? e.target.id : e.target,
-      type: 'smoothstep',
-      animated: true,
-      label: (e.relation && e.relation !== 'related concept' && e.relation !== 'topic') ? e.relation : undefined,
-      labelStyle: { fontSize: 9, fill: '#64748b' },
-      labelBgStyle: { fill: '#f8fafc', fillOpacity: 0.9 },
-      labelBgPadding: [3, 2],
-      style: { stroke: '#94a3b8', strokeWidth: 2 },
-      markerEnd: { type: MarkerType.ArrowClosed, color: '#94a3b8' },
-    }));
+    // Only show a label on edges that carry semantic meaning beyond "has_part"
+    const SILENT_RELATIONS = new Set(['has_part', 'topic', 'related concept', 'related_concept']);
+
+    const initialEdges = edges.map((e, i) => {
+      const src      = typeof e.source === 'object' ? e.source.id : e.source;
+      const tgt      = typeof e.target === 'object' ? e.target.id : e.target;
+      const relation = e.relation || 'has_part';
+      const showLabel = relation && !SILENT_RELATIONS.has(relation);
+
+      // Lateral inter-topic edges (enables, requires, contrasts_with …)
+      // get a slightly different colour so they visually stand out
+      const isLateral = ['enables','requires','extends','contrasts_with',
+                         'precedes','uses','implements','produces','example_of','is_a']
+                        .includes(relation);
+
+      return {
+        id:     `e${i}-${src}-${tgt}`,
+        source: src,
+        target: tgt,
+        type:   'smoothstep',
+        animated: false,               // no animation — reduces visual noise
+        label:  showLabel ? relation : undefined,
+        labelStyle:   { fontSize: 10, fill: isLateral ? '#6366f1' : '#64748b', fontWeight: isLateral ? 600 : 400 },
+        labelBgStyle: { fill: '#ffffff', fillOpacity: 0.92 },
+        labelBgPadding: [4, 3],
+        labelBgBorderRadius: 4,
+        style: {
+          stroke:      isLateral ? '#818cf8' : '#cbd5e1',
+          strokeWidth: isLateral ? 2         : 1.5,
+          strokeDasharray: isLateral ? '6 3' : undefined,
+        },
+        markerEnd: {
+          type:  MarkerType.ArrowClosed,
+          color: isLateral ? '#818cf8' : '#cbd5e1',
+          width: 14,
+          height: 14,
+        },
+      };
+    });
 
     // B. Calculate Layout
     const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(
@@ -324,23 +359,30 @@ export default function ConceptGraph({ nodes = [], edges = [], onSelect }) {
         onNodeClick={onNodeClick}
         nodeTypes={nodeTypes}
         fitView
-        minZoom={0.1} // Allow zooming out far
+        fitViewOptions={{ padding: 0.25, includeHiddenNodes: false }}
+        minZoom={0.08}
+        maxZoom={2}
         attributionPosition="bottom-right"
+        defaultEdgeOptions={{ type: 'smoothstep' }}
+        proOptions={{ hideAttribution: true }}
       >
-        <Background color="#cbd5e1" gap={20} size={1} />
-        <Controls className="!bg-white !border-slate-200 !shadow-sm !text-slate-600" />
-        <MiniMap 
-            nodeColor={n => n.data.isRoot ? '#4f46e5' : '#e2e8f0'} 
-            maskColor="rgba(241, 245, 249, 0.7)"
-            className="!bg-white !border-slate-200"
+        <Background color="#e2e8f0" gap={24} size={1} variant="dots" />
+        <Controls
+          className="!bg-white !border-slate-200 !shadow-sm !rounded-xl"
+          showInteractive={false}
         />
-        
-        {/* Helper Badge */}
-        <div className="absolute top-4 left-4 bg-white/90 backdrop-blur px-3 py-2 rounded-lg shadow-sm border border-slate-200 text-xs text-slate-500">
-           <p className="font-semibold text-slate-700 mb-1">Interactive Map</p>
-           <p>• Drag nodes to reorganize</p>
-           <p>• Scroll to zoom</p>
-           <p>• Click to view details</p>
+        <MiniMap
+          nodeColor={n => n.data?.isRoot ? '#4f46e5' : n.data?.slide_depth === 3 ? '#fbbf24' : '#94a3b8'}
+          maskColor="rgba(241,245,249,0.75)"
+          className="!bg-white !border-slate-200 !rounded-xl"
+          zoomable
+          pannable
+        />
+        {/* Help hint — top-left, compact */}
+        <div className="absolute top-3 left-3 bg-white/90 backdrop-blur-sm px-2.5 py-1.5
+          rounded-lg shadow-sm border border-slate-200 text-[10px] text-slate-400 leading-relaxed pointer-events-none">
+          <span className="font-semibold text-slate-600">Concept Map</span>
+          &nbsp;&middot;&nbsp;drag &nbsp;&middot;&nbsp;scroll to zoom &nbsp;&middot;&nbsp;click for details
         </div>
         <GraphLegend />
       </ReactFlow>

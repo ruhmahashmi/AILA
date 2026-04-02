@@ -747,7 +747,7 @@ export default function CourseWeekPage({ params }) {
             </div>
 
               {/* Graph Container */}
-              <div className="h-[500px] relative bg-white"> 
+              <div className="h-[700px] relative bg-white rounded-xl overflow-hidden"> 
                   {/* Loading Overlay */}
                   {processingFiles.length > 0 && knowledgeGraph.nodes.length > 0 && knowledgeGraph.nodes.length < 5 && (
                       <div className="absolute top-4 right-4 z-20 bg-white/90 backdrop-blur border border-blue-200 text-blue-700 px-3 py-1.5 rounded-full text-xs font-semibold shadow-sm flex items-center gap-2 animate-pulse transition-all">
