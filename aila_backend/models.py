@@ -176,16 +176,15 @@ class QuizAttempt(Base):
 class MCQResponse(Base):
     __tablename__ = "mcq_responses"
 
-    id = Column(String(36), primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
-    attempt_id = Column(String(36), ForeignKey("quiz_attempts.id"))
-    mcq_id = Column(String(36), ForeignKey("mcq.id"))  
+    # Composite PK on (attempt_id, mcq_id): one response per question per attempt
+    attempt_id = Column(String(36), ForeignKey("quiz_attempts.id"), primary_key=True)
+    mcq_id = Column(String(36), ForeignKey("mcq.id"), primary_key=True)
     question = Column(Text, nullable=False)
     answered_at = Column(DateTime(timezone=True), server_default=func.now())
-    selected_answer = Column(String, nullable=False)  # ✅ this exists
-    is_correct = Column(Boolean, default=False)       # ✅ this exists
+    selected_answer = Column(String, nullable=False)
+    is_correct = Column(Boolean, default=False)
 
     __table_args__ = (
-        PrimaryKeyConstraint("attempt_id", "mcq_id"),
         Index("ix_mcq_response_attempt", "attempt_id"),
         Index("ix_mcq_response_mcq", "mcq_id"),
     )

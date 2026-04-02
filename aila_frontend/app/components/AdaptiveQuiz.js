@@ -5,7 +5,7 @@ import { useState, useEffect } from 'react';
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
 
-export default function AdaptiveQuiz({ quizId, attemptId: attemptIdProp, onQuizEnd }) {
+export default function AdaptiveQuiz({ quizId, studentId, attemptId: attemptIdProp, onQuizEnd }) {
   const [attemptId, setAttemptId] = useState(attemptIdProp || null);
   const [mcq, setMcq] = useState(null); // { mcq_id, question, options, answer?, concept_id, difficulty, bloom_level }
   const [answers, setAnswers] = useState([]);
@@ -25,7 +25,7 @@ export default function AdaptiveQuiz({ quizId, attemptId: attemptIdProp, onQuizE
           method: "POST",
           body: new URLSearchParams({
             quiz_id: quizId,
-            student_id: "YOUR_STUDENT_ID", // TODO: logged-in id
+            student_id: studentId,
           }),
         });
         const data = await res.json();
