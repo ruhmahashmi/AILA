@@ -2,6 +2,8 @@
 import axios from "axios";
 import { useState } from "react";
 
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+
 export default function UploadLectureForm({ courseId, weekNumber, onUploadComplete }) {
   const [uploadProgress, setUploadProgress] = useState({}); // { filename: percent }
 
@@ -21,7 +23,7 @@ export default function UploadLectureForm({ courseId, weekNumber, onUploadComple
 
       try {
         const res = await axios.post(
-          "http://localhost:8000/api/upload-lecture/",
+          `${BACKEND_URL}/api/upload-lecture/`,
           formData,
           {
             headers: { "Content-Type": "multipart/form-data" },

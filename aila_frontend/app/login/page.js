@@ -4,6 +4,8 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
+
 export default function LoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState('');
@@ -18,7 +20,7 @@ export default function LoginPage() {
     formData.append("email", email);
     formData.append("password", password);
   
-    const res = await fetch('http://localhost:8000/api/auth/login', {
+    const res = await fetch(`${BACKEND_URL}/api/auth/login`, {
       method: 'POST',
       body: formData,
     });

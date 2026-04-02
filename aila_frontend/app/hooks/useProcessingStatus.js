@@ -2,6 +2,8 @@
 import { useState, useEffect } from "react";
 import axios from "axios";
 
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+
 export default function useProcessingStatus(processingId) {
   const [status, setStatus] = useState("pending");
   const [progress, setProgress] = useState(0);
@@ -13,7 +15,7 @@ export default function useProcessingStatus(processingId) {
     let interval = setInterval(async () => {
       try {
         const res = await axios.get(
-          `http://localhost:8000/api/lecture-status/?processing_id=${processingId}`
+          `${BACKEND_URL}/api/lecture-status/?processing_id=${processingId}`
         );
         setStatus(res.data.status);
         setProgress(res.data.progress);

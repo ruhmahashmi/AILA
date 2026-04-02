@@ -3,6 +3,8 @@
 'use client';
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
+
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
 // import { supabase } from '../../lib/supabaseClient'; // 
 
 export default function SignUpPage() {
@@ -22,7 +24,7 @@ export default function SignUpPage() {
     formData.append("password", password);
     formData.append("role", role);
   
-    const res = await fetch('http://localhost:8000/api/auth/signup', {
+    const res = await fetch(`${BACKEND_URL}/api/auth/signup`, {
       method: 'POST',
       body: formData,
     });
