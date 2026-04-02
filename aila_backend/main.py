@@ -2441,8 +2441,9 @@ async def start_student_quiz(
     # --- Bloom Levels ---
     BLOOM_LEVELS = ["Remember", "Understand", "Apply", "Analyze", "Evaluate", "Create"]
 
-    raw_min_bloom = settings.min_bloom_level if settings and settings.min_bloom_level else "Remember"
-    raw_max_bloom = settings.max_bloom_level if settings and settings.max_bloom_level else "Create"
+    # Normalise to Title case — instructor may have saved lowercase values in DB
+    raw_min_bloom = (settings.min_bloom_level if settings and settings.min_bloom_level else "Remember").strip().title()
+    raw_max_bloom = (settings.max_bloom_level if settings and settings.max_bloom_level else "Create").strip().title()
 
     try:
         bloom_start = BLOOM_LEVELS.index(raw_min_bloom)
@@ -2457,8 +2458,10 @@ async def start_student_quiz(
     # If the frontend sent a recommended_bloom_level (from /api/student/quiz/adaptive-bloom),
     # validate it falls within the instructor-set range and use it to bias selection.
     adaptive_target_bloom = None
-    if recommended_bloom_level and recommended_bloom_level in BLOOM_LEVELS:
-        rec_idx = BLOOM_LEVELS.index(recommended_bloom_level)
+    # Normalise incoming recommended_bloom_level in case frontend sent unexpected casing
+    norm_recommended = recommended_bloom_level.strip().title() if recommended_bloom_level else None
+    if norm_recommended and norm_recommended in BLOOM_LEVELS:
+        rec_idx = BLOOM_LEVELS.index(norm_recommended)
         bloom_start_idx = BLOOM_LEVELS.index(raw_min_bloom) if raw_min_bloom in BLOOM_LEVELS else 0
         bloom_end_idx = BLOOM_LEVELS.index(raw_max_bloom) if raw_max_bloom in BLOOM_LEVELS else len(BLOOM_LEVELS) - 1
         # Clamp to instructor-allowed range
@@ -3163,8 +3166,9 @@ def get_adaptive_bloom(student_id: str, quiz_id: str, db: Session = Depends(get_
 
     # Fetch quiz settings
     settings = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
-    min_bloom = settings.min_bloom_level if settings and settings.min_bloom_level else bloom_levels[0]
-    max_bloom = settings.max_bloom_level if settings and settings.max_bloom_level else bloom_levels[-1]
+    # Normalise casing from DB
+    min_bloom = (settings.min_bloom_level if settings and settings.min_bloom_level else bloom_levels[0]).strip().title()
+    max_bloom = (settings.max_bloom_level if settings and settings.max_bloom_level else bloom_levels[-1]).strip().title()
 
     # Clamp allowed range
     min_idx = bloom_levels.index(min_bloom) if min_bloom in bloom_levels else 0
