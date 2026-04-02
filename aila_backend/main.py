@@ -249,144 +249,232 @@ def repair_json(json_str):
 # --- HELPER: STEP 1 - STRUCTURE IDENTIFICATION ---
 def identify_structure(llm, full_text, file_name):
     """
-    First Pass: Identify just the high-level outline to ensure breadth.
+    First Pass: Identify the high-level outline AND anchor each sub-topic
+    to the exact slide range where it appears.
     """
     print(f"🧠 [PASS 1] Identifying structure for {file_name}...")
-    
+
     prompt = f"""
     Analyze lecture slides "{file_name}".
-    
-    GOAL: List ONLY the top-level topics (Chapters/Sections).
-    
-    RULES:
-    1. If title is "4 Principles", list all 4.
-    2. If title is "Stacks and Queues", list "Stacks" and "Queues".
-    3. Ignore "Introduction" and "Summary".
-    
-    Return JSON:
+
+    GOAL: Identify the main topic and every distinct top-level sub-topic.
+
+    CRITICAL RULES:
+    1. Sub-topics must be the CORE NAMED CONCEPTS, not examples or details.
+       - Lecture "4 Principles of OOP" → sub_topics: ["Encapsulation", "Inheritance", "Polymorphism", "Abstraction"]
+       - Lecture "Stacks and Queues" → sub_topics: ["Stacks", "Queues"]
+       - Lecture "Sorting Algorithms" → sub_topics: ["Bubble Sort", "Merge Sort", "Quick Sort"]
+    2. NEVER use examples, code snippets, or slides as sub-topics.
+    3. NEVER list "Introduction", "Summary", "Overview", "Review" as sub-topics.
+    4. For each sub-topic, find the slide numbers where it is PRIMARILY discussed.
+
+    Return JSON (no extra text, no markdown):
     {{
-        "main_topic": "The single overarching subject",
-        "sub_topics": ["Topic 1", "Topic 2", "Topic 3"]
+        "main_topic": "The single overarching subject (e.g. Object-Oriented Programming)",
+        "sub_topics": [
+            {{"name": "Encapsulation", "slide_nums": [3, 4, 5]}},
+            {{"name": "Inheritance",   "slide_nums": [6, 7, 8]}}
+        ]
     }}
-    
+
     Context:
-    {full_text[:16000]} 
+    {full_text[:16000]}
     """
-    
+
     resp = llm.complete(prompt)
-    return repair_json(str(resp))
+    raw = repair_json(str(resp))
+
+    # Normalise: support both old format (list of strings) and new format (list of dicts)
+    sub_topics_raw = raw.get("sub_topics", [])
+    sub_topics_normalised = []
+    for st in sub_topics_raw:
+        if isinstance(st, str):
+            sub_topics_normalised.append({"name": st, "slide_nums": []})
+        elif isinstance(st, dict) and "name" in st:
+            sub_topics_normalised.append(st)
+    raw["sub_topics"] = sub_topics_normalised
+    return raw
 
 # --- HELPER: STEP 2a - SINGLE SUB-TOPIC EXTRACTION ---
-def extract_concepts_for_subtopic(llm, main_topic, sub_topic, text_slice):
+def extract_concepts_for_subtopic(llm, main_topic, sub_topic_name, sub_topic_id, text_slice):
     """
-    Extract concepts for ONE sub-topic from the relevant portion of text.
-    Called in parallel threads via ThreadPoolExecutor.
+    Extract child concepts for ONE sub-topic.
+    sub_topic_id is the normalised snake_case ID we've already created as a node.
+    The LLM only needs to return CHILDREN of that node.
     """
     prompt = f"""
     You are an expert Computer Science Curriculum Designer.
 
-    TASK: Extract concepts for the sub-topic "{sub_topic}" within "{main_topic}".
+    CONTEXT: We are building a concept map for "{main_topic}".
+    The sub-topic "{sub_topic_name}" is already a node.
+    Your job: find its KEY CHILD CONCEPTS only.
 
-    STRICT CONSTRAINT: Generate AT MOST 4-6 nodes total.
+    RULES:
+    1. Return 2-4 child concepts MAX. These must be direct sub-concepts of "{sub_topic_name}".
+    2. Children must be CONCEPTUAL (definitions, mechanisms, properties) — NOT examples, NOT code.
+       - GOOD child of "Encapsulation": "Access Modifiers", "Data Hiding", "Getter/Setter Methods"
+       - BAD child of "Encapsulation": "BankAccount class", "private int balance", "Python example"
+    3. MERGE related details into one node:
+       - BAD: "public", "private", "protected" (3 nodes) → GOOD: "Access Modifiers" (1 node)
+    4. BANNED: "Introduction", "Summary", "Example", "Overview", "Review", code literals.
+    5. Edge relation must be one of:
+       is_a, has_part, uses, implements, requires, produces, example_of, contrasts_with, precedes
 
-    MERGE RULES (CRITICAL):
-    1. MERGE all "Operations" into ONE node (e.g. "Stack Operations" not Push/Pop/Peek)
-    2. MERGE all "Implementation Details" into ONE node
-    3. MERGE all "Properties/Definitions" into ONE node
-
-    BANNED NODES: "Chapter Objectives", "Self Check", "Summary", "Introduction",
-    "Methods Used", "Performance Impact", questions ("What is...?")
-
-    Edge relation must be one of:
-    is_a, has_part, uses, implements, requires, produces, example_of, contrasts_with, precedes
-
-    Return ONLY valid JSON:
+    Return ONLY this JSON structure (no markdown, no extra text):
     {{
         "nodes": [
             {{
-                "id": "UniqueSnakeCaseId",
+                "id": "snake_case_unique_id",
                 "label": "Human Readable Label",
-                "type": "algorithm|structure|concept|detail|example",
-                "summary": "One sentence describing this concept.",
-                "slide_nums": [3, 4]
+                "type": "concept|structure|algorithm|detail",
+                "summary": "One clear sentence explaining this concept.",
+                "slide_nums": [4, 5]
             }}
         ],
         "edges": [
-            {{ "source": "{sub_topic}", "target": "UniqueSnakeCaseId", "relation": "has_part" }}
+            {{ "source": "{sub_topic_id}", "target": "snake_case_unique_id", "relation": "has_part" }}
         ]
     }}
 
-    Context (focus only on "{sub_topic}"):
-    {text_slice[:12000]}
+    Lecture text (focus on "{sub_topic_name}"):
+    {text_slice[:10000]}
     """
     resp = llm.complete(prompt)
     result = repair_json(str(resp))
-    print(f"  ✓ [{sub_topic}] → {len(result.get('nodes', []))} nodes, {len(result.get('edges', []))} edges")
+    nodes = result.get('nodes', [])
+    edges = result.get('edges', [])
+    print(f"  ✓ [{sub_topic_name}] → {len(nodes)} child nodes, {len(edges)} edges")
     return result
+
+
+def _get_slide_anchored_slice(full_text, slide_nums, fallback_keyword, window=10000):
+    """
+    Build the best possible text slice for a sub-topic.
+    Priority: use the slide numbers from identify_structure.
+    Fallback: keyword search.
+    """
+    if slide_nums:
+        # Extract the blocks for those specific slide numbers from full_text
+        # Slide blocks are formatted as: "--- Title (Slide N) ---\n..."
+        import re
+        blocks = re.split(r'(?=--- .+ \(Slide \d+\) ---)', full_text)
+        matched = []
+        for block in blocks:
+            m = re.match(r'--- .+ \(Slide (\d+)\) ---', block)
+            if m and int(m.group(1)) in slide_nums:
+                matched.append(block)
+        if matched:
+            result = "\n\n".join(matched)
+            return result[:window]
+
+    # Fallback: find keyword in text
+    idx = full_text.lower().find(fallback_keyword.lower())
+    if idx == -1:
+        return full_text[:window]
+    start = max(0, idx - 300)
+    return full_text[start: start + window]
 
 
 # --- HELPER: STEP 2 - CONCEPT EXTRACTION (parallel per sub-topic) ---
 def extract_concepts(llm, structure, full_text):
-    main_topic = structure.get("main_topic", "Lecture")
-    sub_topics  = structure.get("sub_topics", [])
+    main_topic  = structure.get("main_topic", "Lecture")
+    sub_topics  = structure.get("sub_topics", [])  # list of {name, slide_nums}
 
     print(f"🧠 [PASS 2] Extracting concepts for {len(sub_topics)} sub-topics in parallel...")
 
     if not sub_topics:
-        # Fallback: single-call extraction if no sub-topics were identified
-        sub_topics = [main_topic]
+        sub_topics = [{"name": main_topic, "slide_nums": []}]
 
-    # Build per-sub-topic text slices by keyword search in full_text
-    def get_relevant_slice(text, keyword, window=8000):
-        """Return the portion of text most relevant to the keyword."""
-        idx = text.lower().find(keyword.lower())
-        if idx == -1:
-            return text  # keyword not found — give the whole text
-        start = max(0, idx - 500)
-        return text[start: start + window]
+    # Pre-create a node for every sub-topic so they always exist in the graph
+    # and the LLM only needs to return their children.
+    sub_topic_nodes = []
+    sub_topic_id_map = {}  # name -> id
+    for st in sub_topics:
+        st_name = st["name"]
+        st_id   = normalize_id(st_name)  # e.g. "Encapsulation" → "encapsulation"
+        sub_topic_id_map[st_name] = st_id
+        sub_topic_nodes.append({
+            "id":        st_id,
+            "label":     st_name,
+            "type":      "structure",
+            "summary":   f"{st_name} is a core concept within {main_topic}.",
+            "slide_nums": st.get("slide_nums", []),
+            "isRoot":    False
+        })
 
-    # Run extractions in parallel (one thread per sub-topic)
+    # Run child-concept extractions in parallel
     from concurrent.futures import ThreadPoolExecutor, as_completed
     results_by_topic = {}
     with ThreadPoolExecutor(max_workers=min(len(sub_topics), 5)) as pool:
-        future_to_topic = {
-            pool.submit(extract_concepts_for_subtopic, llm, main_topic, st, get_relevant_slice(full_text, st)): st
+        future_to_name = {
+            pool.submit(
+                extract_concepts_for_subtopic,
+                llm,
+                main_topic,
+                st["name"],
+                sub_topic_id_map[st["name"]],
+                _get_slide_anchored_slice(full_text, st.get("slide_nums", []), st["name"])
+            ): st["name"]
             for st in sub_topics
         }
-        for future in as_completed(future_to_topic):
-            st = future_to_topic[future]
+        for future in as_completed(future_to_name):
+            st_name = future_to_name[future]
             try:
-                results_by_topic[st] = future.result()
+                results_by_topic[st_name] = future.result()
             except Exception as e:
-                print(f"  ✗ [{st}] extraction failed: {e}")
-                results_by_topic[st] = {"nodes": [], "edges": []}
+                print(f"  ✗ [{st_name}] extraction failed: {e}")
+                results_by_topic[st_name] = {"nodes": [], "edges": []}
 
-    # Merge all sub-topic results into one graph dict
-    merged_nodes, merged_edges = [], []
+    # Build final graph
+    merged_nodes = []
+    merged_edges = []
     seen_node_ids = set()
-    for st, data in results_by_topic.items():
-        for node in data.get("nodes", []):
-            nid = node.get("id", "")
-            if nid and nid not in seen_node_ids:
-                seen_node_ids.add(nid)
-                merged_nodes.append(node)
-        # Add edge from main_topic → sub_topic root if not already present
-        merged_edges.extend(data.get("edges", []))
-        # Connect sub_topic to main_topic
-        if st != main_topic:
-            merged_edges.append({"source": main_topic, "target": st, "relation": "has_part"})
 
-    # Ensure main_topic root node exists
-    if main_topic not in seen_node_ids:
-        merged_nodes.insert(0, {
-            "id": main_topic,
-            "label": main_topic,
-            "type": "root",
-            "summary": f"Main topic: {main_topic}",
-            "slide_nums": []
+    # 1. Main topic root node
+    main_id = normalize_id(main_topic)
+    merged_nodes.append({
+        "id":      main_id,
+        "label":   main_topic,
+        "type":    "root",
+        "summary": f"Overview of {main_topic}.",
+        "slide_nums": [],
+        "isRoot":  True
+    })
+    seen_node_ids.add(main_id)
+
+    # 2. Sub-topic nodes (always present, at level 1)
+    for st_node in sub_topic_nodes:
+        if st_node["id"] not in seen_node_ids:
+            merged_nodes.append(st_node)
+            seen_node_ids.add(st_node["id"])
+        # Wire: main_topic → sub_topic
+        merged_edges.append({
+            "source":   main_id,
+            "target":   st_node["id"],
+            "relation": "has_part"
         })
 
-    print(f"📊 [PASS 2 DONE] {len(merged_nodes)} total nodes, {len(merged_edges)} edges across {len(sub_topics)} sub-topics")
+    # 3. Child concept nodes from LLM
+    for st_name, data in results_by_topic.items():
+        for node in data.get("nodes", []):
+            nid = node.get("id", "")
+            if not nid:
+                continue
+            # Avoid overwriting a sub-topic node with a child node of the same ID
+            if nid in seen_node_ids:
+                continue
+            # Reject nodes that look like the sub-topic itself (LLM sometimes echoes it)
+            if _similar_labels(node.get("label", ""), st_name):
+                continue
+            seen_node_ids.add(nid)
+            merged_nodes.append(node)
+        for edge in data.get("edges", []):
+            src = edge.get("source", "")
+            tgt = edge.get("target", "")
+            if src and tgt and src != tgt:
+                merged_edges.append(edge)
+
+    print(f"📊 [PASS 2 DONE] {len(merged_nodes)} nodes ({len(sub_topics)} sub-topics + {len(merged_nodes)-len(sub_topics)-1} children), {len(merged_edges)} edges")
     return {"nodes": merged_nodes, "edges": merged_edges}
 
 
@@ -513,6 +601,9 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
         graph_data = extract_concepts(llm, structure, full_text)
         
         main_topic = structure.get("main_topic", file_name)
+        # sub_topics is now list of {name, slide_nums} — extract names for logging
+        st_names = [st["name"] if isinstance(st, dict) else st for st in structure.get("sub_topics", [])]
+        print(f"[STRUCTURE] main='{main_topic}' sub_topics={st_names}")
         raw_nodes = graph_data.get("nodes", [])
         raw_edges = graph_data.get("edges", [])
 
@@ -532,8 +623,9 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
         
         print(f"📊 [GRAPH] Main: {main_topic} | Nodes: {len(clean_nodes)}")
 
-        # Compute Hierarchy
-        final_nodes, final_edges = compute_levels(clean_nodes, clean_edges, explicit_root=main_topic)
+        # Compute Hierarchy — use normalized ID as root (matches what extract_concepts creates)
+        main_topic_id = normalize_id(main_topic)
+        final_nodes, final_edges = compute_levels(clean_nodes, clean_edges, explicit_root=main_topic_id)
 
         # Restore Content Context
         slide_text_map = {s["slide_num"]: s["text"] for s in segments_data}
