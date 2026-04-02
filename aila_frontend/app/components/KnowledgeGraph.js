@@ -19,19 +19,34 @@ export default function KnowledgeGraphLoader({ processingId, courseId, week }) {
 
         // 2. Fetch Graph Data (Even if still processing!)
         // The backend is updating this table in real-time, so we get partial results
-        const graphRes = await fetch(`/api/knowledge-graph?courseId=${courseId}&week=${week}`);
+        const graphRes = await fetch(`/api/knowledge-graph?courseid=${courseId}&week=${week}`);
         const graphData = await graphRes.json();
 
         if (graphData.nodes && graphData.nodes.length > 0) {
           // Transform backend data to ReactFlow format if needed
           // Assuming backend sends: { id: "Topic", label: "Topic", level: 0 ... }
-          const flowNodes = graphData.nodes.map((n, i) => ({
-            id: n.id,
-            data: { label: n.label },
-            // Simple auto-layout: spread them out based on index/level
-            position: { x: (i % 3) * 200, y: n.level * 100 }, 
-            type: n.type === 'root' ? 'input' : 'default'
-          }));
+          // Group nodes by level for proper hierarchical positioning
+          const byLevel = {};
+          graphData.nodes.forEach(n => {
+            const lvl = n.level ?? 0;
+            byLevel[lvl] = byLevel[lvl] || [];
+            byLevel[lvl].push(n);
+          });
+          const flowNodes = graphData.nodes.map((n) => {
+            const lvl = n.level ?? 0;
+            const siblings = byLevel[lvl];
+            const idx = siblings.indexOf(n);
+            const total = siblings.length;
+            return {
+              id: n.id,
+              data: { label: n.label || n.id },
+              position: {
+                x: (idx - (total - 1) / 2) * 240,
+                y: lvl * 130,
+              },
+              type: n.type === 'root' ? 'input' : 'default'
+            };
+          });
 
           const flowEdges = graphData.edges.map((e, i) => ({
             id: `e-${i}`,
