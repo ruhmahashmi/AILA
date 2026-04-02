@@ -1,7 +1,7 @@
 // components/ConceptGraph.js
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import ReactFlow, { 
   useNodesState, 
   useEdgesState, 
@@ -176,16 +176,19 @@ const getLayoutedElements = (nodes, edges, direction = 'TB') => {
 export default function ConceptGraph({ nodes = [], edges = [], onSelect }) {
   const [rfNodes, setNodes, onNodesChange] = useNodesState([]);
   const [rfEdges, setEdges, onEdgesChange] = useEdgesState([]);
-  const [selectedNode, setSelectedNode] = useState(null); // detail panel state
+  const [selectedNode, setSelectedNode] = useState(null); // detail panel
+  const [focusedId,    setFocusedId]    = useState(null); // focus-mode node id
 
-  // 1. Convert Data & Apply Layout
+  // Keep a stable edge-list ref for focus-mode lookups without re-layout
+  const edgeListRef = useRef([]);
+
+  // 1. Build layout once when data changes
   useEffect(() => {
     if (nodes.length === 0) return;
 
-    // A. Transform to React Flow format
     const initialNodes = nodes.map(n => ({
       id: n.id,
-      type: 'concept', // Use our custom card component
+      type: 'concept',
       data: {
         label:       n.label || n.id,
         isRoot:      n.isRoot,
@@ -197,135 +200,150 @@ export default function ConceptGraph({ nodes = [], edges = [], onSelect }) {
         inferred:    n.inferred   || false,
         slide_depth: n.slide_depth || (n.inferred ? 3 : 1),
       },
-      position: { x: 0, y: 0 } // Placeholder, will be fixed by dagre
+      position: { x: 0, y: 0 },
     }));
 
-    // Only show a label on edges that carry semantic meaning beyond "has_part"
     const SILENT_RELATIONS = new Set(['has_part', 'topic', 'related concept', 'related_concept']);
 
     const initialEdges = edges.map((e, i) => {
       const src      = typeof e.source === 'object' ? e.source.id : e.source;
       const tgt      = typeof e.target === 'object' ? e.target.id : e.target;
       const relation = e.relation || 'has_part';
-      const showLabel = relation && !SILENT_RELATIONS.has(relation);
-
-      // Lateral inter-topic edges (enables, requires, contrasts_with …)
-      // get a slightly different colour so they visually stand out
+      const showLabel = !SILENT_RELATIONS.has(relation);
       const isLateral = ['enables','requires','extends','contrasts_with',
                          'precedes','uses','implements','produces','example_of','is_a']
                         .includes(relation);
-
       return {
         id:     `e${i}-${src}-${tgt}`,
         source: src,
         target: tgt,
         type:   'smoothstep',
-        animated: false,               // no animation — reduces visual noise
+        animated: false,
         label:  showLabel ? relation : undefined,
         labelStyle:   { fontSize: 10, fill: isLateral ? '#6366f1' : '#64748b', fontWeight: isLateral ? 600 : 400 },
         labelBgStyle: { fill: '#ffffff', fillOpacity: 0.92 },
         labelBgPadding: [4, 3],
         labelBgBorderRadius: 4,
         style: {
-          stroke:      isLateral ? '#818cf8' : '#cbd5e1',
-          strokeWidth: isLateral ? 2         : 1.5,
+          stroke:          isLateral ? '#818cf8' : '#cbd5e1',
+          strokeWidth:     isLateral ? 2 : 1.5,
           strokeDasharray: isLateral ? '6 3' : undefined,
         },
-        markerEnd: {
-          type:  MarkerType.ArrowClosed,
-          color: isLateral ? '#818cf8' : '#cbd5e1',
-          width: 14,
-          height: 14,
-        },
+        markerEnd: { type: MarkerType.ArrowClosed, color: isLateral ? '#818cf8' : '#cbd5e1', width: 14, height: 14 },
+        // store for focus-mode lookups
+        _src: src, _tgt: tgt,
       };
     });
 
-    // B. Calculate Layout
-    const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(
-      initialNodes,
-      initialEdges
-    );
+    edgeListRef.current = initialEdges;
 
-    setNodes(layoutedNodes);
-    setEdges(layoutedEdges);
+    const { nodes: ln, edges: le } = getLayoutedElements(initialNodes, initialEdges);
+    setNodes(ln);
+    setEdges(le);
+    setFocusedId(null); // reset focus whenever data reloads
   }, [nodes, edges, setNodes, setEdges]);
 
-  // 2. Click Handler — opens detail panel + fires onSelect for parent
+  // 2. Focus-mode overlay — runs on every focusedId change WITHOUT re-layout
+  useEffect(() => {
+    if (rfNodes.length === 0) return;
+
+    if (!focusedId) {
+      // Restore everything to full opacity
+      setNodes(ns => ns.map(n => ({ ...n, style: { ...n.style, opacity: 1 } })));
+      setEdges(es => es.map(e => ({ ...e, style: { ...e.style, opacity: 1 }, animated: false })));
+      return;
+    }
+
+    // Build set of node IDs that are directly connected to focusedId
+    const connected = new Set([focusedId]);
+    edgeListRef.current.forEach(e => {
+      if (e._src === focusedId) connected.add(e._tgt);
+      if (e._tgt === focusedId) connected.add(e._src);
+    });
+
+    setNodes(ns => ns.map(n => ({
+      ...n,
+      style: { ...n.style, opacity: connected.has(n.id) ? 1 : 0.12 },
+    })));
+
+    setEdges(es => es.map(e => {
+      const active = e._src === focusedId || e._tgt === focusedId;
+      return {
+        ...e,
+        animated: active,
+        style: { ...e.style, opacity: active ? 1 : 0.06 },
+      };
+    }));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusedId]);
+
+  // 3. Click: toggle focus on the node; also open detail panel
   const onNodeClick = useCallback((event, node) => {
+    const clickedId = node.id;
     setSelectedNode(node.data);
-    if (onSelect) onSelect(node.id);
+    if (onSelect) onSelect(clickedId);
+    // Toggle: click same node again to exit focus mode
+    setFocusedId(prev => prev === clickedId ? null : clickedId);
   }, [onSelect]);
 
-  const closePanel = useCallback(() => setSelectedNode(null), []);
+  // Click on empty canvas — exit focus mode but keep panel open
+  const onPaneClick = useCallback(() => {
+    setFocusedId(null);
+  }, []);
+
+  const closePanel = useCallback(() => {
+    setSelectedNode(null);
+    setFocusedId(null);
+  }, []);
 
   return (
     <div className="w-full h-full bg-slate-50 rounded-xl overflow-hidden border border-slate-200 shadow-inner relative">
 
-      {/* DETAIL PANEL — slides in from the right when a node is selected */}
+      {/* DETAIL PANEL */}
       {selectedNode && (
         <div className="absolute top-0 right-0 h-full w-80 bg-white border-l border-slate-200 shadow-xl z-20 flex flex-col overflow-hidden">
-          {/* Panel header */}
           <div className={`px-4 py-3 flex items-start justify-between border-b border-slate-100
             ${selectedNode.isRoot ? 'bg-indigo-600 text-white' : 'bg-white'}`}>
             <div className="flex-1 pr-2">
               <p className="font-bold text-sm leading-snug">{selectedNode.label}</p>
               {selectedNode.type && !selectedNode.isRoot && (
-                <p className="text-[10px] uppercase tracking-widest mt-0.5 opacity-60">
-                  {selectedNode.type}
-                </p>
+                <p className="text-[10px] uppercase tracking-widest mt-0.5 opacity-60">{selectedNode.type}</p>
               )}
             </div>
-            <button
-              onClick={closePanel}
+            <button onClick={closePanel}
               className={`flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-lg leading-none
-                ${selectedNode.isRoot ? 'text-white/70 hover:text-white' : 'text-slate-400 hover:text-slate-700'}`}
-            >
+                ${selectedNode.isRoot ? 'text-white/70 hover:text-white' : 'text-slate-400 hover:text-slate-700'}`}>
               ×
             </button>
           </div>
 
-          {/* Panel body */}
           <div className="flex-1 overflow-y-auto p-4 space-y-4 text-sm">
-
-            {/* Summary */}
             {selectedNode.summary && (
               <div>
                 <p className="text-[10px] uppercase tracking-widest text-slate-400 font-semibold mb-1">Summary</p>
                 <p className="text-slate-700 leading-relaxed">{selectedNode.summary}</p>
               </div>
             )}
-
-            {/* Coverage signal */}
             {!selectedNode.isRoot && (() => {
               const depth = selectedNode.slide_depth || (selectedNode.inferred ? 3 : 1);
               const coverageMap = {
-                1: { label: 'Covered in slides', color: 'bg-emerald-50 border-emerald-200 text-emerald-800' },
-                2: { label: 'Mentioned briefly in slides', color: 'bg-sky-50 border-sky-200 text-sky-800' },
-                3: { label: 'Inferred by AI — not explicitly in slides', color: 'bg-amber-50 border-amber-200 text-amber-800' },
+                1: { label: 'Covered in slides',              color: 'bg-emerald-50 border-emerald-200 text-emerald-800' },
+                2: { label: 'Mentioned briefly in slides',    color: 'bg-sky-50     border-sky-200     text-sky-800'     },
+                3: { label: 'Inferred by AI — not in slides', color: 'bg-amber-50   border-amber-200   text-amber-800'   },
               };
               const c = coverageMap[depth] || coverageMap[1];
-              return (
-                <div className={`text-xs font-medium px-3 py-1.5 rounded-lg border ${c.color}`}>
-                  {c.label}
-                </div>
-              );
+              return <div className={`text-xs font-medium px-3 py-1.5 rounded-lg border ${c.color}`}>{c.label}</div>;
             })()}
-
-            {/* Slide numbers */}
-            {selectedNode.slide_nums && selectedNode.slide_nums.length > 0 && (
+            {selectedNode.slide_nums?.length > 0 && (
               <div>
                 <p className="text-[10px] uppercase tracking-widest text-slate-400 font-semibold mb-1">Slides</p>
                 <div className="flex flex-wrap gap-1">
                   {selectedNode.slide_nums.map(n => (
-                    <span key={n} className="px-2 py-0.5 bg-slate-100 text-slate-600 rounded text-xs font-mono">
-                      #{n}
-                    </span>
+                    <span key={n} className="px-2 py-0.5 bg-slate-100 text-slate-600 rounded text-xs font-mono">#{n}</span>
                   ))}
                 </div>
               </div>
             )}
-
-            {/* Slide content excerpt */}
             {selectedNode.contents && (
               <div>
                 <p className="text-[10px] uppercase tracking-widest text-slate-400 font-semibold mb-1">From Slides</p>
@@ -334,18 +352,15 @@ export default function ConceptGraph({ nodes = [], edges = [], onSelect }) {
                 </pre>
               </div>
             )}
-
-            {/* Quiz coverage */}
             {selectedNode.quizCount > 0 && (
               <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
                 <p className="text-amber-800 text-xs font-semibold">
-                  {selectedNode.quizCount} quiz question{selectedNode.quizCount !== 1 ? 's' : ''} target this concept
+                  {selectedNode.quizCount} quiz question{selectedNode.quizCount !== 1 ? 's' : ''} cover this concept
                 </p>
               </div>
             )}
-
             {!selectedNode.summary && !selectedNode.contents && (
-              <p className="text-slate-400 italic text-xs">No additional details available for this concept.</p>
+              <p className="text-slate-400 italic text-xs">No additional details available.</p>
             )}
           </div>
         </div>
@@ -357,33 +372,35 @@ export default function ConceptGraph({ nodes = [], edges = [], onSelect }) {
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onNodeClick={onNodeClick}
+        onPaneClick={onPaneClick}
         nodeTypes={nodeTypes}
         fitView
-        fitViewOptions={{ padding: 0.25, includeHiddenNodes: false }}
+        fitViewOptions={{ padding: 0.25 }}
         minZoom={0.08}
         maxZoom={2}
-        attributionPosition="bottom-right"
-        defaultEdgeOptions={{ type: 'smoothstep' }}
         proOptions={{ hideAttribution: true }}
       >
         <Background color="#e2e8f0" gap={24} size={1} variant="dots" />
-        <Controls
-          className="!bg-white !border-slate-200 !shadow-sm !rounded-xl"
-          showInteractive={false}
-        />
+        <Controls className="!bg-white !border-slate-200 !shadow-sm !rounded-xl" showInteractive={false} />
         <MiniMap
           nodeColor={n => n.data?.isRoot ? '#4f46e5' : n.data?.slide_depth === 3 ? '#fbbf24' : '#94a3b8'}
           maskColor="rgba(241,245,249,0.75)"
           className="!bg-white !border-slate-200 !rounded-xl"
-          zoomable
-          pannable
+          zoomable pannable
         />
-        {/* Help hint — top-left, compact */}
+        {/* Help hint */}
         <div className="absolute top-3 left-3 bg-white/90 backdrop-blur-sm px-2.5 py-1.5
           rounded-lg shadow-sm border border-slate-200 text-[10px] text-slate-400 leading-relaxed pointer-events-none">
           <span className="font-semibold text-slate-600">Concept Map</span>
-          &nbsp;&middot;&nbsp;drag &nbsp;&middot;&nbsp;scroll to zoom &nbsp;&middot;&nbsp;click for details
+          &nbsp;&middot;&nbsp;click to focus &nbsp;&middot;&nbsp;click again or tap canvas to reset
         </div>
+        {focusedId && (
+          <div className="absolute top-3 right-3 z-10 bg-indigo-600 text-white text-[10px] font-semibold
+            px-2.5 py-1.5 rounded-lg shadow-sm flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-white inline-block" />
+            Focus mode · tap canvas to exit
+          </div>
+        )}
         <GraphLegend />
       </ReactFlow>
     </div>
