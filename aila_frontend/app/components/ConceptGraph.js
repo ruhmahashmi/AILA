@@ -1,7 +1,7 @@
 // components/ConceptGraph.js
 "use client";
 
-import { useCallback, useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import ReactFlow, { 
   useNodesState, 
   useEdgesState, 
@@ -131,6 +131,7 @@ const getLayoutedElements = (nodes, edges, direction = 'TB') => {
 export default function ConceptGraph({ nodes = [], edges = [], onSelect }) {
   const [rfNodes, setNodes, onNodesChange] = useNodesState([]);
   const [rfEdges, setEdges, onEdgesChange] = useEdgesState([]);
+  const [selectedNode, setSelectedNode] = useState(null); // detail panel state
 
   // 1. Convert Data & Apply Layout
   useEffect(() => {
@@ -176,13 +177,91 @@ export default function ConceptGraph({ nodes = [], edges = [], onSelect }) {
     setEdges(layoutedEdges);
   }, [nodes, edges, setNodes, setEdges]);
 
-  // 2. Click Handler
+  // 2. Click Handler — opens detail panel + fires onSelect for parent
   const onNodeClick = useCallback((event, node) => {
-     if (onSelect) onSelect(node.id);
+    setSelectedNode(node.data);
+    if (onSelect) onSelect(node.id);
   }, [onSelect]);
 
+  const closePanel = useCallback(() => setSelectedNode(null), []);
+
   return (
-    <div className="w-full h-full bg-slate-50 rounded-xl overflow-hidden border border-slate-200 shadow-inner">
+    <div className="w-full h-full bg-slate-50 rounded-xl overflow-hidden border border-slate-200 shadow-inner relative">
+
+      {/* DETAIL PANEL — slides in from the right when a node is selected */}
+      {selectedNode && (
+        <div className="absolute top-0 right-0 h-full w-80 bg-white border-l border-slate-200 shadow-xl z-20 flex flex-col overflow-hidden">
+          {/* Panel header */}
+          <div className={`px-4 py-3 flex items-start justify-between border-b border-slate-100
+            ${selectedNode.isRoot ? 'bg-indigo-600 text-white' : 'bg-white'}`}>
+            <div className="flex-1 pr-2">
+              <p className="font-bold text-sm leading-snug">{selectedNode.label}</p>
+              {selectedNode.type && !selectedNode.isRoot && (
+                <p className="text-[10px] uppercase tracking-widest mt-0.5 opacity-60">
+                  {selectedNode.type}
+                </p>
+              )}
+            </div>
+            <button
+              onClick={closePanel}
+              className={`flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-lg leading-none
+                ${selectedNode.isRoot ? 'text-white/70 hover:text-white' : 'text-slate-400 hover:text-slate-700'}`}
+            >
+              ×
+            </button>
+          </div>
+
+          {/* Panel body */}
+          <div className="flex-1 overflow-y-auto p-4 space-y-4 text-sm">
+
+            {/* Summary */}
+            {selectedNode.summary && (
+              <div>
+                <p className="text-[10px] uppercase tracking-widest text-slate-400 font-semibold mb-1">Summary</p>
+                <p className="text-slate-700 leading-relaxed">{selectedNode.summary}</p>
+              </div>
+            )}
+
+            {/* Slide numbers */}
+            {selectedNode.slide_nums && selectedNode.slide_nums.length > 0 && (
+              <div>
+                <p className="text-[10px] uppercase tracking-widest text-slate-400 font-semibold mb-1">Slides</p>
+                <div className="flex flex-wrap gap-1">
+                  {selectedNode.slide_nums.map(n => (
+                    <span key={n} className="px-2 py-0.5 bg-slate-100 text-slate-600 rounded text-xs font-mono">
+                      #{n}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Slide content excerpt */}
+            {selectedNode.contents && (
+              <div>
+                <p className="text-[10px] uppercase tracking-widest text-slate-400 font-semibold mb-1">From Slides</p>
+                <pre className="whitespace-pre-wrap text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded-lg p-3 leading-relaxed max-h-64 overflow-y-auto font-sans">
+                  {selectedNode.contents}
+                </pre>
+              </div>
+            )}
+
+            {/* Quiz coverage */}
+            {selectedNode.quizCount > 0 && (
+              <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                <p className="text-amber-800 text-xs font-semibold">
+                  {selectedNode.quizCount} quiz question{selectedNode.quizCount !== 1 ? 's' : ''} target this concept
+                </p>
+              </div>
+            )}
+
+            {!selectedNode.summary && !selectedNode.contents && (
+              <p className="text-slate-400 italic text-xs">No additional details available for this concept.</p>
+            )}
+          </div>
+        </div>
+      )}
+
       <ReactFlow
         nodes={rfNodes}
         edges={rfEdges}
