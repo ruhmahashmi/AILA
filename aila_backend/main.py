@@ -246,98 +246,201 @@ def repair_json(json_str):
             print(f"[JSON ERROR] Failed to parse: {clean[:100]}...")
             return {}
 
-# --- HELPER: STEP 1 - STRUCTURE IDENTIFICATION ---
+# --- HELPER: PASS 1 — COMBINED SLIDE READING + DOMAIN ENRICHMENT ---
 def identify_structure(llm, full_text, file_name):
     """
-    First Pass: Identify the high-level outline AND anchor each sub-topic
-    to the exact slide range where it appears.
+    Single combined pass that does TWO things simultaneously:
+
+    (A) SLIDE READING: Read the actual slide content to extract every concept
+        the lecture covers — whether as a heading, bullet, or passing mention.
+        Assign a "slide_depth" score (1=dedicated section, 2=mentioned/listed
+        only) so downstream prompts know how much detail the slides provide.
+
+    (B) DOMAIN ENRICHMENT: As a CS/IS educator, reason about whether the main
+        topic has canonical sub-concepts that are entirely absent from the slides
+        but MUST be in the concept map to be complete. Only add concepts you are
+        confident belong to this topic in standard CS curriculum.
+
+    Doing both in ONE pass ensures the LLM sees the full slide text while
+    applying domain reasoning — preventing the two-step hallucination problem
+    where a blind enrichment pass invents topics that contradict slide content.
     """
-    print(f"🧠 [PASS 1] Identifying structure for {file_name}...")
+    print(f"🧠 [PASS 1] Reading slides + domain enrichment for {file_name}...")
 
     prompt = f"""
-    Analyze the lecture slides below from "{file_name}".
+    You are an expert Computer Science and Information Science educator.
+    You are building a concept map (knowledge graph) for a CS/IS lecture.
 
-    GOAL: Identify the main topic and every distinct top-level sub-topic DIRECTLY from the slide content.
+    FILE: "{file_name}"
 
-    CRITICAL RULES:
-    1. Read the actual slide headings, section titles, and structure to determine sub-topics.
-       Do NOT guess based on the lecture title — extract what is ACTUALLY in the slides.
-    2. Sub-topics must be the CORE NAMED CONCEPTS that the lecture explicitly covers.
-       The number of sub-topics should match what is genuinely in the slides (could be 2, could be 8).
-    3. NEVER use examples, code snippets, or implementation details as sub-topics.
-    4. NEVER list "Introduction", "Summary", "Overview", "Review", "Conclusion" as sub-topics.
-    5. For each sub-topic, record the slide numbers where it is PRIMARILY discussed.
+    ===== STEP A — READ THE SLIDES =====
+    Read the slide content below carefully.
+    Extract every CONCEPT the lecture covers, whether it appears as:
+      - A dedicated slide heading / section title (these get slide_depth = 1)
+      - A bullet point, sub-heading, or brief mention (these get slide_depth = 2)
+    DO NOT include: navigation text ("Introduction", "Agenda", "Summary",
+    "Overview", "Conclusion"), code variable names, or raw examples.
 
-    Examples of correct extraction across different domains:
-    - Slides on networking protocols → sub_topics: ["TCP/IP", "UDP", "HTTP", "DNS"]
-    - Slides on cellular biology → sub_topics: ["Cell Membrane", "Mitochondria", "Nucleus", "Ribosomes"]
-    - Slides on linear algebra → sub_topics: ["Vectors", "Matrix Multiplication", "Eigenvalues"]
-    - Slides on sorting algorithms → sub_topics: ["Bubble Sort", "Merge Sort", "Quick Sort"]
-    The point: sub-topics come FROM THE CONTENT, not from assumptions about the subject area.
+    For each concept found in the slides:
+      - Use its standard CS/IS canonical name (e.g. "inheriting" → "Inheritance")
+      - Record slide_nums where it appears
+      - Set slide_depth = 1 if it has a dedicated section, 2 if only mentioned
 
-    Return JSON (no extra text, no markdown):
+    ===== STEP B — APPLY DOMAIN KNOWLEDGE =====
+    Now think as a CS educator: given the main topic, are there canonical
+    sub-concepts that belong to it in standard CS curriculum but are COMPLETELY
+    ABSENT from the slides (not even mentioned)?
+    - If yes, add them with slide_depth = 3 ("inferred — not in slides at all")
+    - Only add if you are CONFIDENT they are canonical to this topic
+    - Do NOT add speculative or loosely related topics
+
+    ===== STEP C — RELATIONSHIPS =====
+    For every pair of sub-topics that have a meaningful CS relationship
+    (beyond just "both belong to the main topic"), specify it:
+      is_a, has_part, uses, implements, requires, produces,
+      contrasts_with, precedes, enables, extends, example_of
+    Only include relationships you are confident are correct in CS theory.
+    Think carefully: e.g. "Inheritance" enables "Polymorphism",
+    "Encapsulation" requires "Access Modifiers",
+    "Stack" uses "LIFO Principle", "Merge Sort" precedes "Quicksort" in complexity.
+
+    Return JSON only (no markdown, no extra text):
     {{
-        "main_topic": "The single overarching subject exactly as presented in the slides",
+        "main_topic": "Canonical CS name for the overarching subject",
         "sub_topics": [
-            {{"name": "<exact name from slide content>", "slide_nums": [3, 4, 5]}},
-            {{"name": "<exact name from slide content>", "slide_nums": [6, 7]}}
+            {{
+                "name": "Canonical CS name",
+                "slide_depth": 1,
+                "slide_nums": [3, 4, 5],
+                "summary": "One precise sentence: what this concept IS in CS."
+            }},
+            {{
+                "name": "Concept only mentioned in passing",
+                "slide_depth": 2,
+                "slide_nums": [2],
+                "summary": "One precise sentence."
+            }},
+            {{
+                "name": "Canonical concept not in slides at all",
+                "slide_depth": 3,
+                "slide_nums": [],
+                "summary": "One precise sentence."
+            }}
+        ],
+        "inter_topic_edges": [
+            {{"source": "Sub-topic A", "target": "Sub-topic B", "relation": "enables"}}
         ]
     }}
 
     Slide content:
-    {full_text[:16000]}
+    {full_text[:18000]}
     """
 
     resp = llm.complete(prompt)
     raw = repair_json(str(resp))
 
-    # Normalise: support both old format (list of strings) and new format (list of dicts)
+    # Normalize sub_topics — handle old plain-string format gracefully
     sub_topics_raw = raw.get("sub_topics", [])
     sub_topics_normalised = []
     for st in sub_topics_raw:
         if isinstance(st, str):
-            sub_topics_normalised.append({"name": st, "slide_nums": []})
+            sub_topics_normalised.append({
+                "name": st, "slide_nums": [], "slide_depth": 2, "summary": ""
+            })
         elif isinstance(st, dict) and "name" in st:
+            # Backfill slide_depth if LLM omitted it
+            if "slide_depth" not in st:
+                st["slide_depth"] = 1 if st.get("slide_nums") else 3
+            # Derive inferred flag from slide_depth for downstream compatibility
+            st["inferred"] = (st["slide_depth"] == 3)
             sub_topics_normalised.append(st)
+
     raw["sub_topics"] = sub_topics_normalised
+    # Ensure inter_topic_edges key exists
+    raw.setdefault("inter_topic_edges", [])
+    print(f"  ✓ Pass 1 complete: main_topic='{raw.get('main_topic')}' | "
+          f"{len(sub_topics_normalised)} sub-topics "
+          f"({sum(1 for s in sub_topics_normalised if s['slide_depth']==1)} rich, "
+          f"{sum(1 for s in sub_topics_normalised if s['slide_depth']==2)} mentioned, "
+          f"{sum(1 for s in sub_topics_normalised if s['slide_depth']==3)} inferred) "
+          f"| {len(raw['inter_topic_edges'])} lateral edges")
     return raw
 
 # --- HELPER: STEP 2a - SINGLE SUB-TOPIC EXTRACTION ---
-def extract_concepts_for_subtopic(llm, main_topic, sub_topic_name, sub_topic_id, text_slice):
+def extract_concepts_for_subtopic(llm, main_topic, sub_topic_name, sub_topic_id, text_slice, slide_depth=1):
     """
     Extract child concepts for ONE sub-topic.
-    sub_topic_id is the normalised snake_case ID we've already created as a node.
-    The LLM only needs to return CHILDREN of that node.
+    sub_topic_id: normalised snake_case ID already created as a node.
+    slide_depth:
+      1 = dedicated slide section  — slides are the primary source, supplement with domain knowledge
+      2 = only mentioned/listed    — blend slides (context) + domain knowledge equally
+      3 = not in slides at all     — pure CS domain knowledge, slides give context only
     """
+    if slide_depth == 1:
+        source_instruction = (
+            f'The slides have a DEDICATED SECTION on "{sub_topic_name}". '
+            f'Use the lecture text as the PRIMARY source for child concepts. '
+            f'Supplement with CS domain knowledge only to fill genuine gaps.'
+        )
+    elif slide_depth == 2:
+        source_instruction = (
+            f'"{sub_topic_name}" is MENTIONED in the slides but not given a dedicated section. '
+            f'Use what the slides say as a starting point, then apply CS domain knowledge to '
+            f'identify the standard key sub-concepts of this topic as taught in CS curriculum.'
+        )
+    else:  # slide_depth == 3
+        source_instruction = (
+            f'"{sub_topic_name}" does NOT have dedicated slide content — it was added because '
+            f'it is a canonical part of "{main_topic}" in CS curriculum. '
+            f'Use your CS/IS domain knowledge to identify its key sub-concepts. '
+            f'The lecture context below provides background on the overall lecture.'
+        )
+
     prompt = f"""
-    You are an expert educator building a concept map.
+    You are an expert Computer Science and Information Science educator.
+    You are building a concept map for a CS/IS lecture.
 
-    CONTEXT: We are building a concept map for "{main_topic}".
-    The sub-topic "{sub_topic_name}" is already a node.
-    Your job: find its KEY CHILD CONCEPTS based ONLY on the lecture text provided below.
+    LECTURE TOPIC: "{main_topic}"
+    SUB-TOPIC TO EXPAND: "{sub_topic_name}" (node id: {sub_topic_id})
+    SOURCE GUIDANCE: {source_instruction}
 
-    RULES:
-    1. Return 2-5 child concepts. These must be direct sub-concepts of "{sub_topic_name}" as taught in THIS lecture.
-    2. Children must be CONCEPTUAL (definitions, mechanisms, properties) — NOT examples, NOT code.
-       Examples of what NOT to do (across domains):
-       - BAD: "BankAccount class", "private int balance", "Python example" (these are code/examples)
-       - BAD: "Figure 3", "slide 5 diagram", "see lecture notes" (these are references)
-       GOOD children describe the concept's components, properties, or mechanisms as stated in the slides.
-    3. MERGE related micro-details into one node:
-       - BAD: three separate nodes for each bullet point → GOOD: one node capturing the underlying concept
-    4. BANNED node labels: "Introduction", "Summary", "Example", "Overview", "Review", any code literal.
-    5. Edge relation must be one of:
-       is_a, has_part, uses, implements, requires, produces, example_of, contrasts_with, precedes
+    YOUR TASK: Identify the 2-5 most important CHILD CONCEPTS of "{sub_topic_name}".
 
-    Return ONLY this JSON structure (no markdown, no extra text):
+    WHAT A GOOD CHILD CONCEPT IS:
+    - A named component, property, mechanism, or principle that is PART OF or
+      DIRECTLY RELATED TO "{sub_topic_name}"
+    - Has a clear, teachable CS definition a student should know
+    - Is conceptual — not an example, not code, not a slide artifact
+
+    WHAT TO AVOID:
+    - Code or syntax ("private int x", "def __init__", "return arr")
+    - Generic labels ("Example", "Overview", "Introduction", "Notes")
+    - Slide references ("See Figure 3", "from slide 7")
+    - Overly micro details that should be merged (e.g. don’t list every access
+      modifier separately — use "Access Modifiers" as one node)
+
+    EDGE RELATIONS — pick the most semantically precise:
+      has_part      → a component/sub-concept  (Encapsulation has_part Data Hiding)
+      is_a          → subtype/instance          (Linked List is_a Data Structure)
+      uses          → depends on               (Binary Search uses Sorted Array)
+      implements    → realizes an abstraction   (ArrayList implements List)
+      requires      → precondition             (Inheritance requires Base Class)
+      produces      → generates output         (Hash Function produces Hash Code)
+      contrasts_with→ conceptual opposite      (Recursion contrasts_with Iteration)
+      precedes      → comes before logically    (Definition precedes Implementation)
+      enables       → makes possible           (Inheritance enables Polymorphism)
+      extends       → builds upon              (Override extends Polymorphism)
+      example_of    → concrete instance        (Stack example_of Abstract Data Type)
+
+    Return ONLY this JSON (no markdown, no extra text):
     {{
         "nodes": [
             {{
                 "id": "snake_case_unique_id",
                 "label": "Human Readable Label",
-                "type": "concept|structure|algorithm|detail",
-                "summary": "One clear sentence explaining this concept.",
-                "slide_nums": [4, 5]
+                "type": "concept|detail|algorithm|structure",
+                "summary": "One precise sentence: what this concept IS in CS.",
+                "slide_nums": []
             }}
         ],
         "edges": [
@@ -345,7 +448,7 @@ def extract_concepts_for_subtopic(llm, main_topic, sub_topic_name, sub_topic_id,
         ]
     }}
 
-    Lecture text (focus on "{sub_topic_name}"):
+    Lecture text:
     {text_slice[:10000]}
     """
     resp = llm.complete(prompt)
@@ -386,32 +489,43 @@ def _get_slide_anchored_slice(full_text, slide_nums, fallback_keyword, window=10
 
 # --- HELPER: STEP 2 - CONCEPT EXTRACTION (parallel per sub-topic) ---
 def extract_concepts(llm, structure, full_text):
-    main_topic  = structure.get("main_topic", "Lecture")
-    sub_topics  = structure.get("sub_topics", [])  # list of {name, slide_nums}
+    """
+    Pass 2: Expand each sub-topic from Pass 1 into child concept nodes.
+    Uses slide_depth from Pass 1 to calibrate how much domain knowledge
+    vs slide content to use for each sub-topic.
+    """
+    main_topic        = structure.get("main_topic", "Lecture")
+    sub_topics        = structure.get("sub_topics", [])  # {name, slide_depth, slide_nums, summary, inferred}
+    inter_topic_edges = structure.get("inter_topic_edges", [])
 
-    print(f"🧠 [PASS 2] Extracting concepts for {len(sub_topics)} sub-topics in parallel...")
+    print(f"🧠 [PASS 2] Extracting child concepts for {len(sub_topics)} sub-topics in parallel...")
 
     if not sub_topics:
-        sub_topics = [{"name": main_topic, "slide_nums": []}]
+        sub_topics = [{"name": main_topic, "slide_nums": [], "slide_depth": 1, "inferred": False}]
 
-    # Pre-create a node for every sub-topic so they always exist in the graph
-    # and the LLM only needs to return their children.
+    # Pre-create a node for every sub-topic — guaranteed to exist in graph.
+    # summary comes from Pass 1 (domain-grounded), so we trust it directly.
     sub_topic_nodes = []
-    sub_topic_id_map = {}  # name -> id
+    sub_topic_id_map = {}  # name → id
     for st in sub_topics:
-        st_name = st["name"]
-        st_id   = normalize_id(st_name)  # e.g. "Encapsulation" → "encapsulation"
+        st_name     = st["name"]
+        st_id       = normalize_id(st_name)
+        slide_depth = st.get("slide_depth", 1)
+        is_inferred = st.get("inferred", False) or slide_depth == 3
         sub_topic_id_map[st_name] = st_id
         sub_topic_nodes.append({
-            "id":        st_id,
-            "label":     st_name,
-            "type":      "structure",
-            "summary":   f"{st_name} is a core concept within {main_topic}.",
+            "id":         st_id,
+            "label":      st_name,
+            "type":       "structure",
+            "summary":    st.get("summary") or f"{st_name} is a core concept within {main_topic}.",
             "slide_nums": st.get("slide_nums", []),
-            "isRoot":    False
+            "isRoot":     False,
+            "inferred":   is_inferred,
+            "slide_depth": slide_depth
         })
 
-    # Run child-concept extractions in parallel
+    # Run child-concept extractions in parallel.
+    # Each sub-topic gets slide_depth so the prompt adapts accordingly.
     from concurrent.futures import ThreadPoolExecutor, as_completed
     results_by_topic = {}
     with ThreadPoolExecutor(max_workers=min(len(sub_topics), 5)) as pool:
@@ -422,7 +536,8 @@ def extract_concepts(llm, structure, full_text):
                 main_topic,
                 st["name"],
                 sub_topic_id_map[st["name"]],
-                _get_slide_anchored_slice(full_text, st.get("slide_nums", []), st["name"])
+                _get_slide_anchored_slice(full_text, st.get("slide_nums", []), st["name"]),
+                st.get("slide_depth", 1)
             ): st["name"]
             for st in sub_topics
         }
@@ -438,6 +553,14 @@ def extract_concepts(llm, structure, full_text):
     merged_nodes = []
     merged_edges = []
     seen_node_ids = set()
+    seen_edge_pairs = set()  # (source, target) to avoid duplicate edges
+
+    def _add_edge(src, tgt, relation):
+        """Add edge only if not a duplicate and not self-loop."""
+        key = (normalize_id(src), normalize_id(tgt))
+        if src and tgt and src != tgt and key not in seen_edge_pairs:
+            seen_edge_pairs.add(key)
+            merged_edges.append({"source": normalize_id(src), "target": normalize_id(tgt), "relation": relation})
 
     # 1. Main topic root node
     main_id = normalize_id(main_topic)
@@ -457,13 +580,18 @@ def extract_concepts(llm, structure, full_text):
             merged_nodes.append(st_node)
             seen_node_ids.add(st_node["id"])
         # Wire: main_topic → sub_topic
-        merged_edges.append({
-            "source":   main_id,
-            "target":   st_node["id"],
-            "relation": "has_part"
-        })
+        _add_edge(main_id, st_node["id"], "has_part")
 
-    # 3. Child concept nodes from LLM
+    # 3. Lateral edges between sub-topics from Pass 1.5 domain knowledge
+    for edge in inter_topic_edges:
+        src_name = edge.get("source", "")
+        tgt_name = edge.get("target", "")
+        relation = edge.get("relation", "uses")
+        src_id   = sub_topic_id_map.get(src_name, normalize_id(src_name))
+        tgt_id   = sub_topic_id_map.get(tgt_name, normalize_id(tgt_name))
+        _add_edge(src_id, tgt_id, relation)
+
+    # 4. Child concept nodes from LLM
     for st_name, data in results_by_topic.items():
         for node in data.get("nodes", []):
             nid = node.get("id", "")
@@ -480,10 +608,13 @@ def extract_concepts(llm, structure, full_text):
         for edge in data.get("edges", []):
             src = edge.get("source", "")
             tgt = edge.get("target", "")
-            if src and tgt and src != tgt:
-                merged_edges.append(edge)
+            rel = edge.get("relation", "has_part")
+            _add_edge(src, tgt, rel)
 
-    print(f"📊 [PASS 2 DONE] {len(merged_nodes)} nodes ({len(sub_topics)} sub-topics + {len(merged_nodes)-len(sub_topics)-1} children), {len(merged_edges)} edges")
+    inferred_count = sum(1 for st in sub_topics if st.get("inferred", False))
+    print(f"📊 [PASS 2 DONE] {len(merged_nodes)} nodes "
+          f"({len(sub_topics)} sub-topics [{inferred_count} inferred by domain knowledge] "
+          f"+ {len(merged_nodes)-len(sub_topics)-1} children), {len(merged_edges)} edges")
     return {"nodes": merged_nodes, "edges": merged_edges}
 
 

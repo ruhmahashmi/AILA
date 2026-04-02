@@ -41,9 +41,20 @@ const ConceptNode = ({ data }) => {
   const labelLen = (data.label || '').length;
   const minW = Math.max(150, labelLen * 8 + 32);
 
+  // slide_depth visual treatment:
+  //   1 = dedicated section  → solid border, full opacity (from slides)
+  //   2 = only mentioned     → solid border, slight fade (partially in slides)
+  //   3 = not in slides      → dashed border, faded (pure domain knowledge)
+  const depth = data.slide_depth || (data.inferred ? 3 : 1);
+  const depthStyle = depth === 3
+    ? 'border-dashed opacity-75'
+    : depth === 2
+      ? 'border-solid opacity-90'
+      : 'border-solid';
+
   return (
     <div
-      className={`px-4 py-3 shadow-md rounded-xl border-2 text-center transition-all cursor-pointer hover:shadow-lg ${styles.card}`}
+      className={`px-4 py-3 shadow-md rounded-xl border-2 text-center transition-all cursor-pointer hover:shadow-lg ${styles.card} ${depthStyle}`}
       style={{ minWidth: minW }}
     >
       <Handle type="target" position={Position.Top} className="!bg-slate-400 !w-2 !h-2" />
@@ -56,6 +67,16 @@ const ConceptNode = ({ data }) => {
       {!data.isRoot && styles.badge && (
         <div className={`text-[9px] uppercase tracking-widest font-semibold px-2 py-0.5 rounded-full inline-block mt-1 ${styles.badge}`}>
           {TYPE_LABELS[typeKey] || typeKey}
+        </div>
+      )}
+      {depth === 3 && (
+        <div className="text-[9px] mt-1 bg-amber-100 text-amber-700 font-semibold px-2 py-0.5 rounded-full inline-block">
+          ★ inferred
+        </div>
+      )}
+      {depth === 2 && (
+        <div className="text-[9px] mt-1 bg-sky-100 text-sky-700 font-semibold px-2 py-0.5 rounded-full inline-block">
+          mentioned
         </div>
       )}
       {data.quizCount > 0 && (
@@ -74,17 +95,32 @@ const GraphLegend = () => (
   <div className="absolute bottom-4 left-4 bg-white/95 backdrop-blur px-3 py-3 rounded-xl shadow border border-slate-200 text-xs z-10">
     <p className="font-bold text-slate-700 mb-2 text-[11px] uppercase tracking-wider">Node Types</p>
     {[
-      { type: 'algorithm', color: 'bg-blue-500',   label: 'Algorithm' },
-      { type: 'structure', color: 'bg-purple-500', label: 'Structure' },
-      { type: 'concept',   color: 'bg-slate-400',  label: 'Concept'   },
-      { type: 'detail',    color: 'bg-gray-400',   label: 'Detail'    },
-      { type: 'example',   color: 'bg-green-500',  label: 'Example'   },
+      { color: 'bg-blue-500',   label: 'Algorithm' },
+      { color: 'bg-purple-500', label: 'Structure' },
+      { color: 'bg-slate-400',  label: 'Concept'   },
+      { color: 'bg-gray-400',   label: 'Detail'    },
+      { color: 'bg-green-500',  label: 'Example'   },
     ].map(({ color, label }) => (
       <div key={label} className="flex items-center gap-2 mb-1">
         <div className={`w-2.5 h-2.5 rounded-sm flex-shrink-0 ${color}`} />
         <span className="text-slate-600">{label}</span>
       </div>
     ))}
+    <div className="border-t border-slate-100 mt-2 pt-2 space-y-1">
+      <p className="font-bold text-slate-500 text-[10px] uppercase tracking-wider mb-1">Coverage</p>
+      <div className="flex items-center gap-2">
+        <div className="w-2.5 h-2.5 rounded-sm flex-shrink-0 border-2 border-solid border-slate-400" />
+        <span className="text-slate-600">Covered in slides</span>
+      </div>
+      <div className="flex items-center gap-2">
+        <div className="w-2.5 h-2.5 rounded-sm flex-shrink-0 border-2 border-solid border-sky-400 opacity-80" />
+        <span className="text-sky-700">Mentioned briefly</span>
+      </div>
+      <div className="flex items-center gap-2">
+        <div className="w-2.5 h-2.5 rounded-sm flex-shrink-0 border-2 border-dashed border-amber-500 opacity-75" />
+        <span className="text-amber-700">Inferred by AI</span>
+      </div>
+    </div>
   </div>
 );
 
@@ -142,13 +178,15 @@ export default function ConceptGraph({ nodes = [], edges = [], onSelect }) {
       id: n.id,
       type: 'concept', // Use our custom card component
       data: {
-        label:     n.label || n.id,
-        isRoot:    n.isRoot,
-        type:      n.type || 'concept',
-        summary:   n.summary   || null,
-        contents:  n.contents  || null,
-        slide_nums: n.slide_nums || [],
-        quizCount: n.quizCount || 0,
+        label:       n.label || n.id,
+        isRoot:      n.isRoot,
+        type:        n.type || 'concept',
+        summary:     n.summary    || null,
+        contents:    n.contents   || null,
+        slide_nums:  n.slide_nums || [],
+        quizCount:   n.quizCount  || 0,
+        inferred:    n.inferred   || false,
+        slide_depth: n.slide_depth || (n.inferred ? 3 : 1),
       },
       position: { x: 0, y: 0 } // Placeholder, will be fixed by dagre
     }));
@@ -221,6 +259,22 @@ export default function ConceptGraph({ nodes = [], edges = [], onSelect }) {
                 <p className="text-slate-700 leading-relaxed">{selectedNode.summary}</p>
               </div>
             )}
+
+            {/* Coverage signal */}
+            {!selectedNode.isRoot && (() => {
+              const depth = selectedNode.slide_depth || (selectedNode.inferred ? 3 : 1);
+              const coverageMap = {
+                1: { label: 'Covered in slides', color: 'bg-emerald-50 border-emerald-200 text-emerald-800' },
+                2: { label: 'Mentioned briefly in slides', color: 'bg-sky-50 border-sky-200 text-sky-800' },
+                3: { label: 'Inferred by AI — not explicitly in slides', color: 'bg-amber-50 border-amber-200 text-amber-800' },
+              };
+              const c = coverageMap[depth] || coverageMap[1];
+              return (
+                <div className={`text-xs font-medium px-3 py-1.5 rounded-lg border ${c.color}`}>
+                  {c.label}
+                </div>
+              );
+            })()}
 
             {/* Slide numbers */}
             {selectedNode.slide_nums && selectedNode.slide_nums.length > 0 && (
