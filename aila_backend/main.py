@@ -31,6 +31,7 @@ import re
 import logging
 import google.generativeai as genai
 
+from llama_index.llms.gemini import Gemini
 from aila_backend.database import SessionLocal, Base, engine
 import threading
 import time as _time
@@ -297,7 +298,7 @@ def repair_json(json_str):
             return {}
 
 # --- HELPER: PASS 1 — COMBINED SLIDE READING + DOMAIN ENRICHMENT ---
-def identify_structure(full_text, file_name):
+def identify_structure(llm, full_text, file_name):
     """
     Single combined pass that does TWO things simultaneously:
 
@@ -386,8 +387,8 @@ def identify_structure(full_text, file_name):
     {full_text[:18000]}
     """
 
-    resp = gemini_generate("models/gemini-2.5-flash", prompt)
-    raw = repair_json(resp)
+    resp = llm.complete(prompt)
+    raw = repair_json(str(resp))
 
     # Normalize sub_topics — handle old plain-string format gracefully
     sub_topics_raw = raw.get("sub_topics", [])
@@ -417,7 +418,7 @@ def identify_structure(full_text, file_name):
     return raw
 
 # --- HELPER: STEP 2a - SINGLE SUB-TOPIC EXTRACTION ---
-def extract_concepts_for_subtopic(main_topic, sub_topic_name, sub_topic_id, text_slice, slide_depth=1):
+def extract_concepts_for_subtopic(llm, main_topic, sub_topic_name, sub_topic_id, text_slice, slide_depth=1):
     """
     Extract child concepts for ONE sub-topic.
     sub_topic_id: normalised snake_case ID already created as a node.
@@ -501,8 +502,8 @@ def extract_concepts_for_subtopic(main_topic, sub_topic_name, sub_topic_id, text
     Lecture text:
     {text_slice[:10000]}
     """
-    resp = gemini_generate("models/gemini-2.5-flash", prompt)
-    result = repair_json(resp)
+    resp = llm.complete(prompt)
+    result = repair_json(str(resp))
     nodes = result.get('nodes', [])
     edges = result.get('edges', [])
     print(f"  ✓ [{sub_topic_name}] → {len(nodes)} child nodes, {len(edges)} edges")
@@ -538,7 +539,7 @@ def _get_slide_anchored_slice(full_text, slide_nums, fallback_keyword, window=10
 
 
 # --- HELPER: STEP 2 - CONCEPT EXTRACTION (parallel per sub-topic) ---
-def extract_concepts(structure, full_text):
+def extract_concepts(llm, structure, full_text):
     """
     Pass 2: Expand each sub-topic from Pass 1 into child concept nodes.
     Uses slide_depth from Pass 1 to calibrate how much domain knowledge
@@ -578,11 +579,11 @@ def extract_concepts(structure, full_text):
     # Each sub-topic gets slide_depth so the prompt adapts accordingly.
     from concurrent.futures import ThreadPoolExecutor, as_completed
     results_by_topic = {}
-    # Cap at 3 workers so the rate limiter has time to gate concurrent calls
-    with ThreadPoolExecutor(max_workers=min(len(sub_topics), 3)) as pool:
+    with ThreadPoolExecutor(max_workers=min(len(sub_topics), 5)) as pool:
         future_to_name = {
             pool.submit(
                 extract_concepts_for_subtopic,
+                llm,
                 main_topic,
                 st["name"],
                 sub_topic_id_map[st["name"]],
@@ -781,13 +782,14 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
         # ---------- 2. TWO-PASS GENERATION ----------
         
         # Pass 1: Identify Structure
-        structure = identify_structure(full_text, file_name)
+        llm = Gemini(model="models/gemini-2.5-flash")
+        structure = identify_structure(llm, full_text, file_name)
         if not structure:
              # Fallback structure if LLM fails
              structure = {"main_topic": file_name, "sub_topics": []}
              
         # Pass 2: Extract Concepts based on Structure
-        graph_data = extract_concepts(structure, full_text)
+        graph_data = extract_concepts(llm, structure, full_text)
         
         main_topic = structure.get("main_topic", file_name)
         # sub_topics is now list of {name, slide_nums} — extract names for logging
@@ -1443,8 +1445,10 @@ async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_
     week = payload.get("week")
     concept_id = payload.get("concept_id") or payload.get("segment_id")
     quiz_id = payload.get("quiz_id")
+    # Caller can pass num_questions to tune how many are generated per concept
+    num_questions = int(payload.get("num_questions", 5))
     
-    print(f"[MCQ GEN] Starting generation for concept: {concept_id}, quiz: {quiz_id}")
+    print(f"[MCQ GEN] Starting generation for concept: {concept_id}, quiz: {quiz_id}, target: {num_questions} Qs")
     
     # 1. Determine Difficulty Range (NOT affected by settings - always generate all)
     all_difficulties = ["Easy", "Medium", "Hard"]
@@ -1549,7 +1553,7 @@ Response Format (EXACT JSON):
 Summary: {selected_summary[:800] if selected_summary else "No summary available."}
 Details: {selected_contents[:1200] if selected_contents else "No additional details."}
 
-Generate 5-7 diverse questions covering different Bloom levels and difficulties.
+Generate {num_questions} diverse questions covering different Bloom levels and difficulties.
 """
 
     try:
@@ -2332,15 +2336,24 @@ async def generate_quiz_mcqs(quiz_id: str, payload: GenerateQuizMCQsRequest, db:
         return {"quiz_id": quiz_id, "generated_mcqs": 0, "message": "No concepts"}
 
     count = 0
-    # BUG FIX: removed [:5] cap — generate for ALL concept IDs on the quiz
     target_concepts = quiz.concept_ids
+
+    # Load settings to determine how many questions we need in total
+    settings = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
+    max_q = settings.max_questions if settings and settings.max_questions else 10
+    num_concepts = len(target_concepts)
+    # Generate enough per concept to satisfy max_q, but min 3, max 6
+    # e.g. 10 questions across 5 concepts → 2 each → clamp to 3
+    num_per_concept = max(3, min(6, -(-max_q // num_concepts)))  # ceiling division
+    print(f"[MCQ GEN] {num_concepts} concepts, max_q={max_q} → {num_per_concept} Qs per concept")
 
     for cid in target_concepts:
         kg_payload = {
             "course_id": quiz.course_id,
             "week": quiz.week,
             "concept_id": cid,
-            "quiz_id": quiz.id
+            "quiz_id": quiz.id,
+            "num_questions": num_per_concept,
         }
 
         try:
