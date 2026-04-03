@@ -124,16 +124,15 @@ class QuizSettingsIn(BaseModel):
 class QuizSettingsOut(BaseModel):
     id: int
     quiz_id: str
-    quizid: str
     week: int
-    mindifficulty: str
-    maxdifficulty: str
-    min_bloom_level: str  
-    max_bloom_level: str  
-    maxquestions: int
-    allowedretries: int
-    feedbackstyle: str
-    includespaced: bool
+    min_difficulty: str
+    max_difficulty: str
+    min_bloom_level: str
+    max_bloom_level: str
+    max_questions: int
+    allowed_retries: int
+    feedback_style: str
+    include_spaced: bool
 
     class Config:
         from_attributes = True
@@ -1429,14 +1428,24 @@ async def generate_mcqs_kg(payload: dict = Body(...), db: Session = Depends(get_
 
     if kg_entry:
         try:
-            raw_node_data = kg_entry.node_data  # Use snake_case from unified models
+            raw_node_data = kg_entry.node_data
             
             if raw_node_data:
                 kg_nodes = json.loads(raw_node_data)
+                # BUG FIX: also try normalize_id fallback in case IDs diverged
                 selected_node = next((n for n in kg_nodes if n.get('id') == concept_id), None)
+                if not selected_node:
+                    norm_cid = normalize_id(concept_id)
+                    selected_node = next((n for n in kg_nodes if n.get('id') == norm_cid), None)
+                    if selected_node:
+                        print(f"[MCQ GEN] Matched concept via normalize_id: {concept_id} -> {norm_cid}")
                 if selected_node:
                     selected_summary = selected_node.get('summary', '')
-                    selected_contents = selected_node.get('contents', selected_summary)
+                    # BUG FIX: fall back to label if both summary and contents are empty
+                    selected_contents = selected_node.get('contents') or selected_summary or selected_node.get('label', '')
+                    print(f"[MCQ GEN] Found KG node '{selected_node.get('label')}' — summary={len(selected_summary)} chars, contents={len(selected_contents)} chars")
+                else:
+                    print(f"[MCQ GEN] WARNING: concept_id '{concept_id}' not found in KG nodes. Available IDs: {[n.get('id') for n in kg_nodes[:10]]}")
             else:
                 print("[MCQ GEN] Warning: KG entry found but no node data.")
                 
@@ -1888,13 +1897,12 @@ async def get_next_mcq_gemini(attempt_id: str, db: Session = Depends(get_db)):
 
     # 5. Generate New if None Exist
     print(f"⚡ Generating fresh MCQ for {next_concept_id}...")
+    # BUG FIX: kg_payload was referencing new_mcq (undefined at this point)
     kg_payload = {
-        "mcq_id": new_mcq.id,
-        "question": new_mcq.question,
-        "options": new_mcq.options,
-        "concept_id": new_mcq.concept_id,
-        "difficulty": new_mcq.difficulty, 
-        "bloom_level": new_mcq.bloom_level
+        "course_id": quiz.course_id,
+        "week": quiz.week,
+        "concept_id": next_concept_id,
+        "quiz_id": quiz.id,
     }
     
     try:
@@ -1904,6 +1912,7 @@ async def get_next_mcq_gemini(attempt_id: str, db: Session = Depends(get_db)):
         if new_mcqs_data:
             # SAVE IT IMMEDIATELY so it has a real ID
             first_q = new_mcqs_data[0]
+            # BUG FIX: item["bloom_level"] was undefined — use first_q
             new_mcq = MCQ(
                 id=str(uuid.uuid4()),
                 quiz_id=quiz.id,
@@ -1912,7 +1921,7 @@ async def get_next_mcq_gemini(attempt_id: str, db: Session = Depends(get_db)):
                 options=first_q["options"],
                 answer=first_q["answer"],
                 difficulty=first_q.get("difficulty", "Medium"),
-                bloom_level=item["bloom_level"]
+                bloom_level=first_q.get("bloom_level", "Remember"),
             )
             db.add(new_mcq)
             db.commit()
@@ -2310,18 +2319,16 @@ async def generate_quiz_mcqs(quiz_id: str, payload: GenerateQuizMCQsRequest, db:
         return {"quiz_id": quiz_id, "generated_mcqs": 0, "message": "No concepts"}
 
     count = 0
-    target_concepts = quiz.concept_ids[:5]
+    # BUG FIX: removed [:5] cap — generate for ALL concept IDs on the quiz
+    target_concepts = quiz.concept_ids
 
     for cid in target_concepts:
         kg_payload = {
-            "course_id": quiz.course_id,  # Assuming course_id (check model!)
+            "course_id": quiz.course_id,
             "week": quiz.week,
             "concept_id": cid,
             "quiz_id": quiz.id
         }
-        
-        # Handle course_id vs courseid mismatch in payload preparation if needed
-        # (The generate_mcqs_kg function we fixed earlier handles the reading part)
 
         try:
             gen_resp = await generate_mcqs_kg(kg_payload, db)
@@ -2329,27 +2336,25 @@ async def generate_quiz_mcqs(quiz_id: str, payload: GenerateQuizMCQsRequest, db:
             print(f"[DEBUG] Generated {len(new_mcqs)} MCQs for concept {cid}")
             
             for m in new_mcqs:
-                # Create MCQ object
+                if not m.get("question") or not m.get("options") or not m.get("answer"):
+                    print(f"[SKIP] Malformed MCQ skipped for concept {cid}")
+                    continue
+                # BUG FIX: pass quiz_id directly in constructor — no hasattr dance
                 new_mcq = MCQ(
                     id=str(uuid.uuid4()),
+                    quiz_id=quiz.id,
                     concept_id=cid,
-                    question=m.get("question"),
-                    options=m.get("options"),
-                    answer=m.get("answer"),
-                    difficulty=m.get("difficulty", "Medium"), 
-                    bloom_level=m.get("bloom_level", "Remember"), 
+                    question=m["question"],
+                    options=m["options"],
+                    answer=m["answer"],
+                    difficulty=m.get("difficulty", "Medium"),
+                    bloom_level=m.get("bloom_level", "Remember"),
                 )
-                
-                # Assign FK safely
-                if hasattr(MCQ, 'quiz_id'):
-                    new_mcq.quiz_id = quiz.id
-                else:
-                    new_mcq.quizid = quiz.id
-                    
                 db.add(new_mcq)
                 count += 1
         except Exception as e:
             print(f"[ERROR] Failed to save MCQs for {cid}: {e}")
+            traceback.print_exc()
             continue
 
     db.commit()
