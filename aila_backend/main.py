@@ -57,10 +57,20 @@ genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
 # ── Gemini rate limiter ─────────────────────────────────────────────────────
 # Free tier: 20 req/min. We cap at 15 to leave headroom.
 # All calls to Gemini MUST go through gemini_generate() below.
+#
+# Model fallback chain (each has its own independent free-tier quota bucket):
+#   Primary:  gemini-2.5-flash  (best quality)
+#   Fallback: gemini-1.5-flash  (separate quota — used when 2.5 is exhausted)
+# When the primary model's DAILY quota is exhausted, we automatically switch
+# to the fallback for the rest of the session.
+_MODEL_PRIMARY  = "models/gemini-2.5-flash"
+_MODEL_FALLBACK = "models/gemini-1.5-flash"
+_active_model   = _MODEL_PRIMARY   # flips to fallback on daily quota exhaustion
+
 _RATE_LIMIT_RPM = 15          # max requests per minute
 _RATE_WINDOW    = 60.0        # seconds
-_MAX_RETRIES    = 8           # retry on 429 up to this many times
-_RETRY_BACKOFF  = [15, 30, 60, 90, 120, 120, 120, 120]  # seconds to wait before each retry
+_MAX_RETRIES    = 3           # retry on 429 up to this many times (short — we fallback instead)
+_RETRY_BACKOFF  = [15, 30, 60]  # seconds to wait before each retry
 
 _rate_lock       = threading.Lock()
 _request_times: list = []     # timestamps of recent requests
@@ -70,14 +80,12 @@ def _wait_for_rate_slot():
     while True:
         with _rate_lock:
             now = _time.monotonic()
-            # Drop timestamps older than the window
             cutoff = now - _RATE_WINDOW
             while _request_times and _request_times[0] < cutoff:
                 _request_times.pop(0)
             if len(_request_times) < _RATE_LIMIT_RPM:
                 _request_times.append(now)
-                return  # slot acquired
-            # Need to wait until the oldest request ages out
+                return
             wait_secs = _RATE_WINDOW - (now - _request_times[0]) + 0.1
         print(f"[RATE LIMIT] {len(_request_times)}/{_RATE_LIMIT_RPM} req in window — waiting {wait_secs:.1f}s")
         _time.sleep(wait_secs)
@@ -85,9 +93,18 @@ def _wait_for_rate_slot():
 def gemini_generate(model_name: str, prompt: str) -> str:
     """
     Single entry point for ALL Gemini text generation.
-    Enforces the rate limit and retries automatically on 429.
+    Enforces the rate limit and retries on 429.
+    If the primary model's daily quota is exhausted, automatically falls back
+    to gemini-1.5-flash (separate quota bucket) for the rest of the session.
     Returns the response text string.
     """
+    global _active_model
+
+    # If caller passed the primary model name but we've already fallen back,
+    # silently use the fallback so all callers benefit without changing their code.
+    if model_name == _MODEL_PRIMARY and _active_model == _MODEL_FALLBACK:
+        model_name = _MODEL_FALLBACK
+
     for attempt in range(_MAX_RETRIES + 1):
         _wait_for_rate_slot()
         try:
@@ -97,12 +114,19 @@ def gemini_generate(model_name: str, prompt: str) -> str:
         except Exception as e:
             err_str = str(e)
             if "429" in err_str or "quota" in err_str.lower() or "rate" in err_str.lower():
+                # If we're on the primary model and have retried enough, switch to fallback
+                if model_name == _MODEL_PRIMARY and attempt >= 1:
+                    print(f"[GEMINI] Primary model quota exhausted — switching to fallback {_MODEL_FALLBACK}")
+                    _active_model = _MODEL_FALLBACK
+                    model_name    = _MODEL_FALLBACK
+                    # Don't count this as a retry — immediately try fallback
+                    continue
                 wait = _RETRY_BACKOFF[min(attempt, len(_RETRY_BACKOFF) - 1)]
-                print(f"[GEMINI 429] Attempt {attempt+1}/{_MAX_RETRIES} — retrying in {wait}s")
+                print(f"[GEMINI 429] Attempt {attempt+1}/{_MAX_RETRIES} on {model_name} — retrying in {wait}s")
                 _time.sleep(wait)
                 continue
             raise  # non-rate-limit error — bubble up
-    raise RuntimeError(f"[GEMINI] Exceeded {_MAX_RETRIES} retries due to rate limiting")
+    raise RuntimeError(f"[GEMINI] Exceeded {_MAX_RETRIES} retries on {model_name} — quota exhausted on all models")
 
 Base.metadata.create_all(bind=engine)
 
