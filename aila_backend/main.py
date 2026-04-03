@@ -2089,45 +2089,28 @@ async def delete_upload(uploadid: str = Form(...), db: Session = Depends(get_db)
 
 @app.get("/api/quiz/settings/{quiz_id}", response_model=QuizSettingsOut)
 async def get_quiz_settings(quiz_id: str, db: Session = Depends(get_db)):
-    qs = None
-    try:
-        qs = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
-    except AttributeError:
-        qs = db.query(QuizSettings).filter(QuizSettings.quizid == quiz_id).first()
-    
+    qs = db.query(QuizSettings).filter(QuizSettings.quiz_id == quiz_id).first()
+
     if not qs:
+        # Return defaults as a dict with the correct snake_case keys
         quiz = db.query(Quiz).filter(Quiz.id == quiz_id).first()
         default_week = quiz.week if quiz else 1
         return {
             "id": -1,
-            "quizid": quiz_id,
             "quiz_id": quiz_id,
             "week": default_week,
-            "mindifficulty": "Easy",
-            "maxdifficulty": "Hard",
-            "min_bloom_level": "Remember", 
-            "max_bloom_level": "Create",    
-            "maxquestions": 10,
-            "allowedretries": 3,
-            "feedbackstyle": "Immediate",
-            "includespaced": False
+            "min_difficulty": "Easy",
+            "max_difficulty": "Hard",
+            "min_bloom_level": "Remember",
+            "max_bloom_level": "Create",
+            "max_questions": 10,
+            "allowed_retries": 3,
+            "feedback_style": "Immediate",
+            "include_spaced": False
         }
 
-    # Get existing values with safe attribute access
-    return {
-        "id": qs.id,
-        "quizid": getattr(qs, 'quiz_id', quiz_id),
-        "quiz_id": getattr(qs, 'quiz_id', quiz_id),
-        "week": qs.week,
-        "mindifficulty": getattr(qs, 'min_difficulty', 'Easy'),
-        "maxdifficulty": getattr(qs, 'max_difficulty', 'Hard'),
-        "min_bloom_level": getattr(qs, 'min_bloom_level', 'Remember'),  
-        "max_bloom_level": getattr(qs, 'max_bloom_level', 'Create'),    
-        "maxquestions": getattr(qs, 'max_questions', 10),
-        "allowedretries": getattr(qs, 'allowed_retries', 3),
-        "feedbackstyle": getattr(qs, 'feedback_style', 'Immediate'),
-        "includespaced": getattr(qs, 'include_spaced', False)
-    }
+    # Let Pydantic serialize the ORM object directly via from_attributes
+    return qs
 
 
 @app.post("/api/quiz/settings/{quiz_id}", response_model=QuizSettingsOut)
@@ -2161,22 +2144,8 @@ async def upsert_quiz_settings(quiz_id: str, payload: QuizSettingsIn, db: Sessio
         
     db.commit()
     db.refresh(qs)
-    
-    # ✅ Return properly formatted dict
-    return {
-        "id": qs.id,
-        "quiz_id": qs.quiz_id,
-        "quizid": qs.quiz_id,
-        "week": qs.week,
-        "mindifficulty": qs.min_difficulty,
-        "maxdifficulty": qs.max_difficulty,
-        "min_bloom_level": qs.min_bloom_level,
-        "max_bloom_level": qs.max_bloom_level,
-        "maxquestions": qs.max_questions,
-        "allowedretries": qs.allowed_retries,
-        "feedbackstyle": qs.feedback_style,
-        "includespaced": qs.include_spaced
-    }
+    # Let Pydantic serialize the ORM object directly via from_attributes
+    return qs
 
 
 

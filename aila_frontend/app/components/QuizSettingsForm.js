@@ -36,14 +36,14 @@ export default function QuizSettingsForm({ quizId, week }) {
           const data = await res.json();
           if (active && data) {
             setSettings({
-              mindifficulty: data.mindifficulty || "Easy",
-              maxdifficulty: data.maxdifficulty || "Hard",
-              min_bloom_level: data.min_bloom_level || "Remember",  // ✅ Add
-              max_bloom_level: data.max_bloom_level || "Create",    // ✅ Add
-              maxquestions: data.maxquestions ?? 10,
-              allowedretries: data.allowedretries ?? 3,
-              feedbackstyle: data.feedbackstyle || "Immediate",
-              includespaced: data.includespaced ?? false
+              mindifficulty: data.min_difficulty || "Easy",
+              maxdifficulty: data.max_difficulty || "Hard",
+              min_bloom_level: data.min_bloom_level || "Remember",
+              max_bloom_level: data.max_bloom_level || "Create",
+              maxquestions: data.max_questions ?? 10,
+              allowedretries: data.allowed_retries ?? 3,
+              feedbackstyle: data.feedback_style || "Immediate",
+              includespaced: data.include_spaced ?? false
             });
           }
         }
@@ -87,14 +87,14 @@ export default function QuizSettingsForm({ quizId, week }) {
       setMessage({ type: "success", text: "Settings saved!" });
       setSettings(prev => ({
         ...prev,
-        mindifficulty: savedData.mindifficulty,
-        maxdifficulty: savedData.maxdifficulty,
-        min_bloom_level: savedData.min_bloom_level,
-        max_bloom_level: savedData.max_bloom_level,
-        maxquestions: savedData.maxquestions,
-        allowedretries: savedData.allowedretries,
-        feedbackstyle: savedData.feedbackstyle,
-        includespaced: savedData.includespaced,
+        mindifficulty: savedData.min_difficulty || prev.mindifficulty,
+        maxdifficulty: savedData.max_difficulty || prev.maxdifficulty,
+        min_bloom_level: savedData.min_bloom_level || prev.min_bloom_level,
+        max_bloom_level: savedData.max_bloom_level || prev.max_bloom_level,
+        maxquestions: savedData.max_questions ?? prev.maxquestions,
+        allowedretries: savedData.allowed_retries ?? prev.allowedretries,
+        feedbackstyle: savedData.feedback_style || prev.feedbackstyle,
+        includespaced: savedData.include_spaced ?? prev.includespaced,
       }));
     } catch (e) {
       setMessage({ type: "error", text: "Error saving settings." });

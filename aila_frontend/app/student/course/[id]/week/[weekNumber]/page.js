@@ -125,10 +125,22 @@ export default function StudentCourseWeekPage({ params }) {
     }
   }
 
+  // Derived from quiz settings — feedback_style controls whether Check Answer is shown
+  const feedbackStyle = quizData?.settings?.feedback_style || "Immediate";
+  const isImmediateFeedback = feedbackStyle.toLowerCase() === "immediate";
+  const maxRetries = quizData?.settings?.per_question_retries || 3;
+
   async function handleCheckAnswer() {
     const currentQ = quizData.questions[currentQuestionIndex];
     const selected = answers[currentQ.id];
     if (!selected) return;
+    // In Summary mode, don't call check-answer — just record the answer and move on
+    if (!isImmediateFeedback) {
+      if (currentQuestionIndex < quizData.questions.length - 1) {
+        setCurrentQuestionIndex(prev => prev + 1);
+      }
+      return;
+    }
     const currentAttemptCount = (retryCounts[currentQ.id] || 0) + 1;
     setRetryCounts(prev => ({ ...prev, [currentQ.id]: currentAttemptCount }));
     setFeedbackStatus("checking");
@@ -354,9 +366,16 @@ export default function StudentCourseWeekPage({ params }) {
             </button>
             <div className="flex items-center gap-3">
               <span className="text-sm text-gray-500 font-medium">Question {currentQuestionIndex + 1} of {quizData.questions.length}</span>
-              <div className="bg-blue-50 px-3 py-1 rounded-full text-xs font-semibold text-blue-600 border border-blue-100">
-                Tries left: {Math.max(0, (quizData.settings?.per_question_retries || 3) - (retryCounts[currentQ.id] || 0))}
-              </div>
+              {isImmediateFeedback && (
+                <div className="bg-blue-50 px-3 py-1 rounded-full text-xs font-semibold text-blue-600 border border-blue-100">
+                  Tries left: {Math.max(0, maxRetries - (retryCounts[currentQ.id] || 0))}
+                </div>
+              )}
+              {!isImmediateFeedback && (
+                <div className="bg-amber-50 px-3 py-1 rounded-full text-xs font-semibold text-amber-600 border border-amber-100">
+                  Summary feedback
+                </div>
+              )}
             </div>
           </div>
           <div className="w-full bg-gray-200 rounded-full h-2 mb-3">
@@ -437,12 +456,25 @@ export default function StudentCourseWeekPage({ params }) {
                   Previous
                 </button>
                 <div className="flex gap-3">
-                  {(feedbackStatus === "idle" || (feedbackStatus === "incorrect" && !currentFeedback?.retries_exhausted)) && (
+                  {/* SUMMARY MODE: just Next/Finish, no check-answer */}
+                  {!isImmediateFeedback && (
+                    isLastQuestion ? (
+                      <button onClick={handleSubmit} disabled={submitting || !answers[currentQ.id]} className="px-8 py-3 bg-green-600 text-white font-bold rounded-xl hover:bg-green-700 shadow-lg disabled:opacity-50">
+                        {submitting ? "Submitting..." : "Finish Quiz"}
+                      </button>
+                    ) : (
+                      <button onClick={handleNext} disabled={!answers[currentQ.id]} className="px-8 py-3 bg-gray-900 text-white font-bold rounded-xl hover:bg-black transition-all shadow-lg flex items-center gap-2 disabled:opacity-50">
+                        Next Question →
+                      </button>
+                    )
+                  )}
+                  {/* IMMEDIATE MODE: Check Answer + retry logic */}
+                  {isImmediateFeedback && (feedbackStatus === "idle" || (feedbackStatus === "incorrect" && !currentFeedback?.retries_exhausted)) && (
                     <button onClick={handleCheckAnswer} disabled={!answers[currentQ.id] || feedbackStatus === "checking"} className={`px-8 py-3 font-bold rounded-xl shadow-lg disabled:opacity-50 transition-all ${feedbackStatus === "incorrect" ? "bg-red-600 text-white hover:bg-red-700" : "bg-blue-600 text-white hover:bg-blue-700"}`}>
                       {feedbackStatus === "checking" ? "Checking..." : (feedbackStatus === "incorrect" ? "Try Again" : "Check Answer")}
                     </button>
                   )}
-                  {(feedbackStatus === "correct" || (feedbackStatus === "incorrect" && currentFeedback?.retries_exhausted)) && (
+                  {isImmediateFeedback && (feedbackStatus === "correct" || (feedbackStatus === "incorrect" && currentFeedback?.retries_exhausted)) && (
                     isLastQuestion ? (
                       <button onClick={handleSubmit} disabled={submitting} className="px-8 py-3 bg-green-600 text-white font-bold rounded-xl hover:bg-green-700 shadow-lg">
                         {submitting ? "Submitting..." : "Finish Quiz"}
