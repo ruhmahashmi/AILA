@@ -779,7 +779,25 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
         if not structure:
              # Fallback structure if LLM fails
              structure = {"main_topic": file_name, "sub_topics": []}
-             
+
+        # Cap sub-topics before Pass 2 to stay within free-tier quota.
+        # Priority: slide_depth=1 (dedicated section) > slide_depth=2 (mentioned)
+        # Skip slide_depth=3 (inferred/not in slides) — they cost a call but
+        # add the least value since there's no slide text to anchor them.
+        _MAX_SUBTOPICS = 8
+        all_subs = structure.get("sub_topics", [])
+        rich   = [s for s in all_subs if s.get("slide_depth", 1) == 1]
+        mentioned = [s for s in all_subs if s.get("slide_depth", 1) == 2]
+        inferred  = [s for s in all_subs if s.get("slide_depth", 1) == 3]
+        capped = (rich + mentioned)[:_MAX_SUBTOPICS]
+        if len(all_subs) > _MAX_SUBTOPICS:
+            print(f"⚠️ [QUOTA] Capping sub-topics {len(all_subs)}→{len(capped)} "
+                  f"(skipping {len(inferred)} inferred + overflow) to stay under free-tier limit")
+        structure["sub_topics"] = capped
+
+        # Brief pause so Pass 1's quota usage doesn't immediately collide with Pass 2
+        _time.sleep(5)
+
         # Pass 2: Extract Concepts based on Structure
         graph_data = extract_concepts(structure, full_text)
         
