@@ -1,6 +1,7 @@
 from dotenv import load_dotenv
-load_dotenv()
 import os
+# Load .env from the same directory as this file, regardless of where uvicorn is launched from
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, Body
 from fastapi import WebSocket, WebSocketDisconnect, Path
