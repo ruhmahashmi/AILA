@@ -791,7 +791,10 @@ export default function CourseWeekPage({ params }) {
                 week={Number(weekNumber)}
                 concepts={knowledgeGraph.nodes}
                 edges={knowledgeGraph.edges}
-                onQuizCreated={fetchQuizzes}
+                onQuizCreated={async (newQuizId) => {
+                  await fetchQuizzes();
+                  if (newQuizId) setSelectedQuizId(newQuizId);
+                }}
                 onConceptClick={handleConceptSelect}
               />
             </div>

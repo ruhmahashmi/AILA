@@ -300,7 +300,7 @@ export default function QuizCreator({ courseId, week, concepts = [], edges = [],
       if (data) {
         setName(""); setSelected([]); setUserHasEditedName(false);
         setShowSuggestions(true);
-        onQuizCreated?.();
+        onQuizCreated?.(data.quiz_id);
       }
     } catch (e) {
       setError(`Network error: ${e?.message || e}`);
