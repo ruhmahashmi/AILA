@@ -2493,12 +2493,22 @@ async def start_student_quiz(
             and stored_bloom_target != adaptive_target_bloom
         )
 
-        if stored_q_ids and not bloom_target_changed:
+        # Count how many MCQs are now in the bank for this quiz
+        total_available = db.query(MCQ).filter(MCQ.quiz_id == quiz_id).count()
+        # Stale if: stored IDs are fewer than max_q AND more questions exist now
+        stored_is_stale = (
+            len(stored_q_ids) < max_q
+            and total_available > len(stored_q_ids)
+        )
+
+        if stored_q_ids and not bloom_target_changed and not stored_is_stale:
             # Restore the exact same question order from when the attempt was created
             id_to_mcq = {m.id: m for m in db.query(MCQ).filter(MCQ.id.in_(stored_q_ids)).all()}
             selected_mcqs = [id_to_mcq[qid] for qid in stored_q_ids if qid in id_to_mcq]
             print(f"[RESUME] Restored {len(selected_mcqs)} questions (bloom_target='{stored_bloom_target}')")
         else:
+            if stored_is_stale:
+                print(f"[RESUME] Stale attempt: had {len(stored_q_ids)} Qs stored, {total_available} now available — re-selecting up to {max_q}")
             if bloom_target_changed:
                 print(f"[RESUME] Bloom target changed {stored_bloom_target!r} -> {adaptive_target_bloom!r}, re-selecting questions")
             else:
