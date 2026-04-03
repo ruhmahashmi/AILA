@@ -14,7 +14,6 @@ from sqlalchemy import text as sql_text
 from sqlalchemy import or_
 
 from pydantic import BaseModel, Field
-from llama_index.llms.gemini import Gemini
 from pptx import Presentation
 from typing import List, Optional, Dict, Set
 from collections import deque, defaultdict, Counter
@@ -33,6 +32,8 @@ import logging
 import google.generativeai as genai
 
 from aila_backend.database import SessionLocal, Base, engine
+import threading
+import time as _time
 from aila_backend.models import (
     User,
     Course,
@@ -51,6 +52,56 @@ from aila_backend.models import (
 UPLOAD_DIR = "db/uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
+
+# ── Gemini rate limiter ─────────────────────────────────────────────────────
+# Free tier: 20 req/min. We cap at 15 to leave headroom.
+# All calls to Gemini MUST go through gemini_generate() below.
+_RATE_LIMIT_RPM = 15          # max requests per minute
+_RATE_WINDOW    = 60.0        # seconds
+_MAX_RETRIES    = 4           # retry on 429 up to this many times
+_RETRY_BACKOFF  = [10, 20, 40, 60]  # seconds to wait before each retry
+
+_rate_lock       = threading.Lock()
+_request_times: list = []     # timestamps of recent requests
+
+def _wait_for_rate_slot():
+    """Block until we are allowed to send one more request."""
+    while True:
+        with _rate_lock:
+            now = _time.monotonic()
+            # Drop timestamps older than the window
+            cutoff = now - _RATE_WINDOW
+            while _request_times and _request_times[0] < cutoff:
+                _request_times.pop(0)
+            if len(_request_times) < _RATE_LIMIT_RPM:
+                _request_times.append(now)
+                return  # slot acquired
+            # Need to wait until the oldest request ages out
+            wait_secs = _RATE_WINDOW - (now - _request_times[0]) + 0.1
+        print(f"[RATE LIMIT] {len(_request_times)}/{_RATE_LIMIT_RPM} req in window — waiting {wait_secs:.1f}s")
+        _time.sleep(wait_secs)
+
+def gemini_generate(model_name: str, prompt: str) -> str:
+    """
+    Single entry point for ALL Gemini text generation.
+    Enforces the rate limit and retries automatically on 429.
+    Returns the response text string.
+    """
+    for attempt in range(_MAX_RETRIES + 1):
+        _wait_for_rate_slot()
+        try:
+            model = genai.GenerativeModel(model_name)
+            resp  = model.generate_content(prompt)
+            return getattr(resp, "text", str(resp))
+        except Exception as e:
+            err_str = str(e)
+            if "429" in err_str or "quota" in err_str.lower() or "rate" in err_str.lower():
+                wait = _RETRY_BACKOFF[min(attempt, len(_RETRY_BACKOFF) - 1)]
+                print(f"[GEMINI 429] Attempt {attempt+1}/{_MAX_RETRIES} — retrying in {wait}s")
+                _time.sleep(wait)
+                continue
+            raise  # non-rate-limit error — bubble up
+    raise RuntimeError(f"[GEMINI] Exceeded {_MAX_RETRIES} retries due to rate limiting")
 
 Base.metadata.create_all(bind=engine)
 
@@ -246,7 +297,7 @@ def repair_json(json_str):
             return {}
 
 # --- HELPER: PASS 1 — COMBINED SLIDE READING + DOMAIN ENRICHMENT ---
-def identify_structure(llm, full_text, file_name):
+def identify_structure(full_text, file_name):
     """
     Single combined pass that does TWO things simultaneously:
 
@@ -335,8 +386,8 @@ def identify_structure(llm, full_text, file_name):
     {full_text[:18000]}
     """
 
-    resp = llm.complete(prompt)
-    raw = repair_json(str(resp))
+    resp = gemini_generate("models/gemini-2.5-flash", prompt)
+    raw = repair_json(resp)
 
     # Normalize sub_topics — handle old plain-string format gracefully
     sub_topics_raw = raw.get("sub_topics", [])
@@ -366,7 +417,7 @@ def identify_structure(llm, full_text, file_name):
     return raw
 
 # --- HELPER: STEP 2a - SINGLE SUB-TOPIC EXTRACTION ---
-def extract_concepts_for_subtopic(llm, main_topic, sub_topic_name, sub_topic_id, text_slice, slide_depth=1):
+def extract_concepts_for_subtopic(main_topic, sub_topic_name, sub_topic_id, text_slice, slide_depth=1):
     """
     Extract child concepts for ONE sub-topic.
     sub_topic_id: normalised snake_case ID already created as a node.
@@ -450,8 +501,8 @@ def extract_concepts_for_subtopic(llm, main_topic, sub_topic_name, sub_topic_id,
     Lecture text:
     {text_slice[:10000]}
     """
-    resp = llm.complete(prompt)
-    result = repair_json(str(resp))
+    resp = gemini_generate("models/gemini-2.5-flash", prompt)
+    result = repair_json(resp)
     nodes = result.get('nodes', [])
     edges = result.get('edges', [])
     print(f"  ✓ [{sub_topic_name}] → {len(nodes)} child nodes, {len(edges)} edges")
@@ -487,7 +538,7 @@ def _get_slide_anchored_slice(full_text, slide_nums, fallback_keyword, window=10
 
 
 # --- HELPER: STEP 2 - CONCEPT EXTRACTION (parallel per sub-topic) ---
-def extract_concepts(llm, structure, full_text):
+def extract_concepts(structure, full_text):
     """
     Pass 2: Expand each sub-topic from Pass 1 into child concept nodes.
     Uses slide_depth from Pass 1 to calibrate how much domain knowledge
@@ -527,11 +578,11 @@ def extract_concepts(llm, structure, full_text):
     # Each sub-topic gets slide_depth so the prompt adapts accordingly.
     from concurrent.futures import ThreadPoolExecutor, as_completed
     results_by_topic = {}
-    with ThreadPoolExecutor(max_workers=min(len(sub_topics), 5)) as pool:
+    # Cap at 3 workers so the rate limiter has time to gate concurrent calls
+    with ThreadPoolExecutor(max_workers=min(len(sub_topics), 3)) as pool:
         future_to_name = {
             pool.submit(
                 extract_concepts_for_subtopic,
-                llm,
                 main_topic,
                 st["name"],
                 sub_topic_id_map[st["name"]],
@@ -620,7 +671,6 @@ def extract_concepts(llm, structure, full_text):
 # --- MAIN PIPELINE FUNCTION ---
 def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, processing_id):
     db = SessionLocal()
-    llm = Gemini(model="models/gemini-2.5-flash") 
 
     try:
         # 0. Init Status
@@ -731,13 +781,13 @@ def process_lecture_and_kg(filepath, upload_id, course_id, week, file_name, proc
         # ---------- 2. TWO-PASS GENERATION ----------
         
         # Pass 1: Identify Structure
-        structure = identify_structure(llm, full_text, file_name)
+        structure = identify_structure(full_text, file_name)
         if not structure:
              # Fallback structure if LLM fails
              structure = {"main_topic": file_name, "sub_topics": []}
              
         # Pass 2: Extract Concepts based on Structure
-        graph_data = extract_concepts(llm, structure, full_text)
+        graph_data = extract_concepts(structure, full_text)
         
         main_topic = structure.get("main_topic", file_name)
         # sub_topics is now list of {name, slide_nums} — extract names for logging
@@ -1368,9 +1418,7 @@ async def generate_mcqs(payload: MCQConceptModel = Body(...)):
         f"\n\nRelated contents (for MCQ details):\n{payload.contents[:1200]}"
     )
     try:
-        model = genai.GenerativeModel("models/gemini-2.5-flash")
-        response = model.generate_content(prompt)
-        model_output = str(getattr(response, "text", getattr(response, "candidates", response)))
+        model_output = gemini_generate("models/gemini-2.5-flash", prompt)
         mcqs = extract_mcqs_from_response(model_output)
         out = []
         for item in mcqs:
@@ -1505,10 +1553,7 @@ Generate 5-7 diverse questions covering different Bloom levels and difficulties.
 """
 
     try:
-        model = genai.GenerativeModel('models/gemini-2.5-flash')
-        response = model.generate_content(prompt)
-        model_output = getattr(response, 'text', str(response))
-        
+        model_output = gemini_generate('models/gemini-2.5-flash', prompt)
         print(f"[MCQ GEN] Raw LLM output length: {len(model_output)}")
         
         mcqs = extract_mcqs_from_response(model_output)
@@ -2190,9 +2235,8 @@ async def generate_quiz_title(payload: TitleGenRequest):
     )
 
     try:
-        model = genai.GenerativeModel('models/gemini-2.5-flash')
-        response = model.generate_content(prompt)
-        title = response.text.strip().replace('"', '').replace("'", "")
+        raw_title = gemini_generate('models/gemini-2.5-flash', prompt)
+        title = raw_title.strip().replace('"', '').replace("'", "")
         return {"title": title}
     except Exception as e:
         print(f"Title Gen Error: {e}")
@@ -2938,8 +2982,6 @@ async def generate_knowledge_graph(course_id: str, week: int, processing_id: str
         file_name = upload_record.file_name if upload_record else "Lecture Topic"
 
         # 2. Call LLM
-        model = genai.GenerativeModel("gemini-2.5-flash")
-        
         prompt = f"""
         You are an expert computer science instructor. Analyze the following lecture content from "{file_name}".
         
@@ -2962,9 +3004,9 @@ async def generate_knowledge_graph(course_id: str, week: int, processing_id: str
         {full_text}
         """
 
-        response = model.generate_content(prompt)
+        raw_resp = gemini_generate("models/gemini-2.5-flash", prompt)
         # robust json cleaning
-        cleaned_text = response.text.replace("```json", "").replace("```", "").strip()
+        cleaned_text = raw_resp.replace("```json", "").replace("```", "").strip()
         data = json.loads(cleaned_text)
 
         # 3. Process Hierarchy
