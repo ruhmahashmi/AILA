@@ -59,8 +59,8 @@ genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
 # All calls to Gemini MUST go through gemini_generate() below.
 _RATE_LIMIT_RPM = 15          # max requests per minute
 _RATE_WINDOW    = 60.0        # seconds
-_MAX_RETRIES    = 4           # retry on 429 up to this many times
-_RETRY_BACKOFF  = [10, 20, 40, 60]  # seconds to wait before each retry
+_MAX_RETRIES    = 8           # retry on 429 up to this many times
+_RETRY_BACKOFF  = [15, 30, 60, 90, 120, 120, 120, 120]  # seconds to wait before each retry
 
 _rate_lock       = threading.Lock()
 _request_times: list = []     # timestamps of recent requests
@@ -549,7 +549,7 @@ def extract_concepts(structure, full_text):
     sub_topics        = structure.get("sub_topics", [])  # {name, slide_depth, slide_nums, summary, inferred}
     inter_topic_edges = structure.get("inter_topic_edges", [])
 
-    print(f"🧠 [PASS 2] Extracting child concepts for {len(sub_topics)} sub-topics in parallel...")
+    print(f"🧠 [PASS 2] Extracting child concepts for {len(sub_topics)} sub-topics sequentially...")
 
     if not sub_topics:
         sub_topics = [{"name": main_topic, "slide_nums": [], "slide_depth": 1, "inferred": False}]
@@ -575,30 +575,23 @@ def extract_concepts(structure, full_text):
             "slide_depth": slide_depth
         })
 
-    # Run child-concept extractions in parallel.
-    # Each sub-topic gets slide_depth so the prompt adapts accordingly.
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    # Run child-concept extractions sequentially to avoid overwhelming the
+    # Gemini free-tier quota (20 req/min). The rate limiter handles pacing;
+    # parallel workers would race to grab slots and still burst past the cap.
     results_by_topic = {}
-    # Rate limiter gates each call so parallel workers won't burst past quota
-    with ThreadPoolExecutor(max_workers=min(len(sub_topics), 5)) as pool:
-        future_to_name = {
-            pool.submit(
-                extract_concepts_for_subtopic,
+    for st in sub_topics:
+        st_name = st["name"]
+        try:
+            results_by_topic[st_name] = extract_concepts_for_subtopic(
                 main_topic,
-                st["name"],
-                sub_topic_id_map[st["name"]],
-                _get_slide_anchored_slice(full_text, st.get("slide_nums", []), st["name"]),
+                st_name,
+                sub_topic_id_map[st_name],
+                _get_slide_anchored_slice(full_text, st.get("slide_nums", []), st_name),
                 st.get("slide_depth", 1)
-            ): st["name"]
-            for st in sub_topics
-        }
-        for future in as_completed(future_to_name):
-            st_name = future_to_name[future]
-            try:
-                results_by_topic[st_name] = future.result()
-            except Exception as e:
-                print(f"  ✗ [{st_name}] extraction failed: {e}")
-                results_by_topic[st_name] = {"nodes": [], "edges": []}
+            )
+        except Exception as e:
+            print(f"  ✗ [{st_name}] extraction failed: {e}")
+            results_by_topic[st_name] = {"nodes": [], "edges": []}
 
     # Build final graph
     merged_nodes = []
