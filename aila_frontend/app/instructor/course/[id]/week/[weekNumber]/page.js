@@ -372,6 +372,7 @@ export default function CourseWeekPage({ params }) {
   const [quizStats, setQuizStats] = useState(null);
   const [quizPreview, setQuizPreview] = useState(null);
   const [loadingPreview, setLoadingPreview] = useState(false);
+  const [isGeneratingMCQs, setIsGeneratingMCQs] = useState(false);
   const [previewError, setPreviewError] = useState(null);
   const [filterDifficulty, setFilterDifficulty] = useState("All");
 
@@ -476,19 +477,30 @@ export default function CourseWeekPage({ params }) {
   // --- ACTIONS ---
   const generateQuizMCQs = async () => {
     if (!selectedQuizId) return;
-    setLoadingPreview(true);
+    setIsGeneratingMCQs(true);
+    setPreviewError(null);
     try {
-      await fetch(`${BACKEND_URL}/api/quiz/generate-mcqs/${selectedQuizId}`, {
+      const res = await fetch(`${BACKEND_URL}/api/quiz/generate-mcqs/${selectedQuizId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "generate_from_concepts" })
       });
+      if (!res.ok) {
+        const err = await res.json().catch(() => null);
+        setPreviewError(`Generation failed: ${err?.detail || res.status}`);
+        return;
+      }
+      const result = await res.json().catch(() => null);
+      if (result?.generated_mcqs === 0) {
+        setPreviewError("No MCQs were generated — the quiz may have no concepts attached.");
+      }
       await loadPreview();
       await fetchQuizStats();
     } catch (e) {
       console.error(e);
+      setPreviewError(`Generation error: ${e?.message || e}`);
     } finally {
-      setLoadingPreview(false);
+      setIsGeneratingMCQs(false);
     }
   };
 
@@ -921,10 +933,20 @@ export default function CourseWeekPage({ params }) {
                        <div className="flex gap-3 pt-2 border-t border-gray-100">
                           <button 
                             onClick={loadPreview}
-                            className="px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-50 transition-colors font-medium flex items-center gap-2"
+                            disabled={loadingPreview || isGeneratingMCQs}
+                            className="px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-50 transition-colors font-medium flex items-center gap-2 disabled:opacity-50"
                           >
                             🔄 Refresh
                           </button>
+                          {allMcqs.length === 0 && !isGeneratingMCQs && (
+                            <button
+                              onClick={generateQuizMCQs}
+                              disabled={isGeneratingMCQs}
+                              className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700 transition-colors font-medium flex items-center gap-2 disabled:opacity-50"
+                            >
+                              ✨ Generate Questions
+                            </button>
+                          )}
                        </div>
                     </div>
 
@@ -938,7 +960,7 @@ export default function CourseWeekPage({ params }) {
                             ))}
                           </div>
                        ) : (
-                          !loadingPreview && (
+                          !loadingPreview && !isGeneratingMCQs && (
                             <div className="flex flex-col items-center justify-center h-full min-h-[300px] text-gray-400">
                                <div className="text-5xl mb-4 opacity-20">📝</div>
                                <p className="text-lg font-medium text-gray-500">
@@ -948,10 +970,12 @@ export default function CourseWeekPage({ params }) {
                           )
                        )}
                        
-                       {loadingPreview && (
+                       {(loadingPreview || isGeneratingMCQs) && (
                            <div className="flex flex-col items-center justify-center h-64">
                              <div className="animate-spin h-10 w-10 border-4 border-blue-500 border-t-transparent rounded-full mb-4"></div>
-                             <p className="text-sm font-medium text-gray-500">Loading Questions...</p>
+                             <p className="text-sm font-medium text-gray-500">
+                               {isGeneratingMCQs ? "Generating questions with AI..." : "Loading questions..."}
+                             </p>
                            </div>
                        )}
                     </div>
