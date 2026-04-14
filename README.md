@@ -251,13 +251,6 @@ Frontend runs on `http://localhost:3000` by default.
 - Multi-subject expansion: STEM, data science, life sciences
 - Analytics dashboards with concept mastery heatmaps
 
----
-
-## Acknowledgements
-
-Thank you to **Drexel UREP** for supporting this research through the **STAR Scholars Program (2025)** and the **UREP Mini-Grant ($1,000, 2026)**, and to **Dr. Yuan An** for mentorship throughout every phase of this project.
-
----
 
 ## Contact
 
@@ -272,12 +265,3 @@ College of Computing & Informatics, Drexel University
 College of Computing & Informatics, Drexel University
 
 ---
-
-<div align="center">
-
-*Pennoni Honors College Student Showcase — April 14, 2026*
-
-![Drexel](https://img.shields.io/badge/Drexel_University-07294D?style=for-the-badge&logo=data:image/png;base64,)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
-
-</div>
