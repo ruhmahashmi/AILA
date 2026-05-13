@@ -16,6 +16,7 @@ class Question:
 @dataclass
 class Student:
     student_id: int
+    profile_type: str
     true_mastery: dict
 
 @dataclass
