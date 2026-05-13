@@ -1,17 +1,18 @@
 import csv
-import os
 
 INTERACTION_LOG_PATH = "interaction_log.csv"
 RUN_SUMMARY_PATH = "run_summary.csv"
 
 INTERACTION_FIELDS = [
-    "student_id", "profile_type", "step", "question_id",
-    "concept_id", "response", "true_mastery_concept",
-    "old_mastery", "new_mastery"
+    "student_id", "profile_type", "step", "policy",
+    "question_id", "concept_id", "response",
+    "true_mastery_concept", "old_mastery", "new_mastery",
+    "mastery_snapshot", "convergence_delta"
 ]
 
 RUN_SUMMARY_FIELDS = [
-    "student_id", "profile_type", "total_questions",
+    "student_id", "profile_type", "policy",
+    "total_questions", "stop_reason",
     "final_mastery", "true_mastery"
 ]
 
