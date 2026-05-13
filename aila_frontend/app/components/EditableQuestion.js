@@ -1,3 +1,4 @@
+// components/EditableQuestion.js
 'use client';
 import { useState } from 'react';
 

@@ -411,7 +411,7 @@ export default function QuizCreator({ courseId, week, concepts = [], edges = [],
       <div className="space-y-3 lg:border-l lg:border-gray-100 lg:pl-6">
         <div className="flex items-center justify-between">
           <div>
-            <p className="text-xs font-bold text-gray-500 uppercase tracking-wide">AI Suggestions</p>
+            <p className="text-xs font-bold text-gray-500 uppercase tracking-wide">Quiz Suggestions</p>
             <p className="text-[10px] text-gray-400 mt-0.5">Concepts that work well together</p>
           </div>
           {suggestions.length > 0 && (
