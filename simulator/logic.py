@@ -19,10 +19,11 @@ def update_mastery(estimated, concept_id, response):
     estimated.mastery[concept_id] = new
     return old, new
 
-def run_simulation(build_graph, build_questions, make_student, init_estimate):
+def run_simulation(build_graph, build_questions, student, init_estimate):
     graph = build_graph()
     questions = build_questions()
-    student = make_student()
+    estimated = init_estimate()
+    asked = set()
     estimated = init_estimate()
     asked = set()
 
