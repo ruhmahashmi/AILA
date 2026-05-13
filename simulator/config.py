@@ -6,8 +6,8 @@ DEFAULT_GUESS = 0.20
 INITIAL_MASTERY = 0.5
 UPDATE_STEP = 0.1
 
-# Policy Settings
-POLICY = "random"  # options later: "graph_neighbor", "information_based"
+# Policy options: "random", "graph_neighbor", "information_based"
+POLICY = "information_based"
 MAX_QUESTIONS = 12  
 
 # Student Generation Settings
