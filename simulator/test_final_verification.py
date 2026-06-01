@@ -65,4 +65,4 @@ if __name__ == "__main__":
             print(f"  {e}")
         raise AssertionError("Final verification failed.")
     else:
-        print("All output files verified. Week 9 is complete.")
+        print("All output files verified. Week 9 is complete.") # complete
