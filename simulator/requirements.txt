@@ -1,0 +1,9 @@
+# No third-party dependencies required.
+# This project uses Python standard library only.
+# Tested with Python 3.8+
+#
+# Standard library modules used:
+#   csv      - reading and writing CSV output files
+#   random   - student generation and response simulation
+#   ast      - parsing mastery vector fields when loading CSVs into analysis tools
+#   os       - file path handling in logger
