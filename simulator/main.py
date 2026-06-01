@@ -33,7 +33,25 @@ def run_policy_batch(policy_name, students):
     save_interaction_log(interaction_rows, filename=f"interaction_log_{suffix}.csv")
     save_run_summary(summary_rows,         filename=f"run_summary_{suffix}.csv")
     print(f"[{policy_name}] Done. {len(summary_rows)} students written.")
+    print_profile_breakdown(summary_rows, policy_name)
     return summary_rows
+
+def print_profile_breakdown(summary_rows, policy_name):
+    """Print correct response rate broken down by profile type."""
+    from collections import defaultdict
+    profile_correct = defaultdict(list)
+
+    for row in summary_rows:
+        # final_mastery is a dict — average it as a proxy for overall correctness
+        avg_mastery = sum(row["final_mastery"].values()) / len(row["final_mastery"])
+        profile_correct[row["profile_type"]].append(avg_mastery)
+
+    print(f"\n  [{policy_name}] Average final mastery by profile:")
+    for profile in ["strong", "medium", "weak"]:
+        values = profile_correct.get(profile, [])
+        if values:
+            avg = sum(values) / len(values)
+            print(f"    {profile:8s}: {avg:.3f}")
 
 if __name__ == "__main__":
     random.seed(config.RANDOM_SEED or 42)
