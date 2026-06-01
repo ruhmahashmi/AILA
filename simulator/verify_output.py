@@ -34,7 +34,7 @@ def verify_interaction_log():
 
         rows = list(reader)
 
-    # Check row count
+    # Check row counts
     if len(rows) != 3600:
         errors.append(f"  Expected 3600 rows, got {len(rows)}")
 
