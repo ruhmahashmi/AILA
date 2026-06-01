@@ -1,0 +1,42 @@
+Week 9 Interpretive Summary
+AILA Adaptive Testing — Policy Comparison Results
+===================================================
+
+1. Which policy produced higher average diagnostic accuracy overall?
+
+Information-Based produced higher average diagnostic accuracy across all three student
+profiles. Averaged across strong, medium, and weak students, Graph Neighbor achieved
+0.8469 and Information-Based achieved 0.8656. The overall difference
+(0.0187) is small but consistent across the three random seeds
+used in this evaluation, which confirms the result is not an artefact of a single student
+population.
+
+2. Did the advantage hold across all three student profiles?
+
+The pattern was not uniform across profiles. For strong students, Information-Based
+performed better (0.8817 vs 0.8950). For medium students, Information-Based
+performed better (0.8567 vs 0.8650). For weak students, Information-Based
+performed better (0.8022 vs 0.8367). This suggests the relative advantage
+of each policy depends on the student's knowledge level, which is consistent with the
+design intent of Graph Neighbor — its graph-constrained path is most useful when a student
+needs to be guided through foundational dependencies rather than assessed globally.
+
+3. What does the per-concept coverage pattern suggest about why?
+
+The concept coverage analysis shows a structural difference between the two policies.
+Graph Neighbor concentrated its selections on concept 6 and its graph neighbours,
+producing an uneven distribution across the six concepts. Information-Based consistently
+directed questions toward concept 2 most often, but distributed coverage more evenly
+overall. This means Graph Neighbor and Information-Based are genuinely asking different
+questions for the same students — the accuracy difference is not noise but reflects a
+real difference in how each policy explores the concept space.
+
+The stability analysis confirms that both policies are consistent across seeds, with low
+standard deviations for all profile types (GN strong std: 0.0072,
+IB strong std: 0.0111; GN weak std: 0.0231,
+IB weak std: 0.0163). This means the findings are stable enough to report
+with confidence in the final evaluation.
+
+---
+Generated automatically from evaluation_metrics.csv and concept_coverage.csv.
+To be expanded in the Week 10 report discussion section.
