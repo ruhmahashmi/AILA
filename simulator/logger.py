@@ -1,4 +1,5 @@
 import csv
+import os
 
 INTERACTION_LOG_PATH = "interaction_log.csv"
 RUN_SUMMARY_PATH = "run_summary.csv"
@@ -34,3 +35,22 @@ def log_run_summary(row: dict):
     with open(RUN_SUMMARY_PATH, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=RUN_SUMMARY_FIELDS)
         writer.writerow(row)
+
+
+def save_interaction_log(rows, filename="interaction_log.csv"):
+    if not rows:
+        return
+    fieldnames = list(rows[0].keys())
+    with open(filename, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+def save_run_summary(rows, filename="run_summary.csv"):
+    if not rows:
+        return
+    fieldnames = list(rows[0].keys())
+    with open(filename, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
