@@ -435,3 +435,211 @@ across seeds.
 *Figure 4: Standard deviation of diagnostic accuracy across seeds by policy and profile (Chart 4).*
 
 ---
+
+## 7. Limitations
+
+The evaluation presented in this report was conducted within a controlled simulation
+environment designed to enable clean comparison between the two policies. Several
+design decisions simplify the evaluation setting relative to real adaptive tutoring
+deployments. Each is acknowledged here with its consequence for interpreting the
+findings.
+
+### 7.1 Binary Mastery Representation
+
+Student mastery is represented as a binary value per concept — a student either has
+or has not mastered a given concept. This representation enables a precise definition
+of diagnostic accuracy: the fraction of concepts whose final estimated mastery
+matches the true binary label. In practice, student knowledge exists on a continuum;
+a student may have partial mastery of a concept, demonstrating it under some question
+types but not others. The binary representation used here means the evaluation
+measures classification accuracy over a simplified ground truth. The finding that
+Information-Based outperforms Graph Neighbor in binary classification accuracy is
+valid within this representation but may not generalize directly to settings where
+mastery is treated as continuous and evaluation is measured by, for example, mean
+squared error between estimated and true mastery levels.
+
+### 7.2 Independent Concept Mastery Generation
+
+Each student's mastery of the six concepts is sampled independently — a student's
+mastery of concept C3 is generated without conditioning on their mastery of C1, even
+if the knowledge graph encodes C1 as a prerequisite of C3. This simplifies student
+generation and ensures that the three profile types produce students who differ
+systematically in their overall mastery levels. However, it means the student
+population does not reflect the prerequisite structure that the Graph Neighbor policy
+is designed to exploit. A student who has mastered C1 is no more likely to have
+mastered C3 than one who has not, even when C1 → C3 in the graph. This may
+systematically understate Graph Neighbor's advantage in a real student population,
+where prerequisite structure is real — knowing C1 genuinely makes C3 more likely,
+which would make local graph traversal a more informative strategy. The findings
+should therefore be interpreted as reflecting performance on a population where the
+graph structure is less predictive of mastery co-occurrence than it would be in
+a real classroom.
+
+### 7.3 Fixed Slip and Guess Parameters
+
+The BKT response model uses fixed slip (s = 0.10) and guess (g = 0.20) parameters
+across all concepts and all students. These values are plausible for a low-noise
+setting but were not validated against real response data. The relative accuracy
+advantage of Information-Based over Graph Neighbor depends on how noisily student
+responses reflect true mastery — with higher slip and guess values, mastery estimates
+update more slowly and the information value of individual questions changes. The
+direction of the IB advantage is expected to be robust, since coverage unevenness
+under Graph Neighbor would remain a limitation regardless of noise level. However,
+the magnitude of the advantage — 0.0133 for strong students, 0.0345 for weak
+students — may be sensitive to slip and guess values and should not be treated as
+precise effect sizes without further sensitivity analysis.
+
+### 7.4 Cold-Start Mastery Initialization
+
+All concept mastery estimates are initialized at 0.5 — the point of maximum
+uncertainty under BKT — for every student at the start of every session. This
+initialization is standard in BKT cold-start scenarios but may favour
+Information-Based selection. Since IB selects the concept with maximum expected
+information, and all concepts begin at equal uncertainty, IB's early selections
+are effectively arbitrary — it has no prior to exploit. As the session progresses
+and estimates diverge, IB's advantage becomes meaningful. Warm-start scenarios, in
+which prior session data is available to initialize estimates at values other than
+0.5, would change the early-session selection behavior of both policies and may
+alter the relative accuracy gap. The findings reported here apply specifically to
+cold-start evaluation; warm-start performance is an open question.
+
+### 7.5 Simulation versus Language-Based Question Selection
+
+The question selection criterion used in this evaluation is information-theoretic:
+both policies select questions by reasoning over BKT mastery estimates and graph
+structure. AILA's actual question selection uses natural language processing to
+match student queries to question bank items based on embedding similarity or
+keyword overlap. This is a different selection mechanism. The information-based
+policy evaluated here is an idealized version of what a probabilistic adaptive
+layer would do if layered on top of AILA's existing NLP matching — it does not
+replace NLP matching and cannot be dropped directly into AILA without an
+integration layer that bridges the two mechanisms. Section 9 addresses this
+integration question directly.
+
+---
+
+## 8. Future Work
+
+### 8.1 Continuous Mastery and Extended BKT
+
+The binary mastery representation used in this evaluation is the most tractable
+formulation of BKT but not the most realistic. A direct extension would replace
+each concept's binary true mastery label with a continuous mastery probability,
+sampled from a Beta distribution with parameters tuned to each profile type. Mastery
+update rules would remain the same, but the evaluation metric would shift from
+classification accuracy to root mean squared error between the final posterior mean
+and the true mastery probability. This extension would test whether the coverage
+advantage of Information-Based translates into lower estimation error under
+continuous mastery — a stronger claim than classification accuracy.
+
+A further extension within this direction is to implement the Deep Knowledge Tracing
+(DKT) formulation, in which mastery is estimated by an LSTM rather than the BKT
+update rule. DKT has been shown to outperform BKT on real student response
+datasets; comparing IB and GN policies on top of a DKT mastery model would
+test whether the policy advantage is model-dependent or robust across mastery
+representations.
+
+### 8.2 Correlated Concept Generation with Prerequisite Structure
+
+The most significant gap between this simulation and a real student population is
+the absence of prerequisite-correlated mastery generation. A concrete extension
+would generate student mastery vectors by propagating mastery probabilities through
+the knowledge graph: if C1 is a prerequisite of C3, the probability of mastering
+C3 is conditioned on mastery of C1. This could be implemented as a topological
+ordering of the graph nodes, with each node's mastery probability computed as a
+weighted function of its parents' mastery values plus a student-specific noise term.
+
+Under correlated generation, Graph Neighbor's local traversal strategy would have
+genuine signal to exploit — a student who has mastered C1 and C2 is likely to have
+mastered C3, making the graph-following strategy more informative. Re-running the
+evaluation under correlated generation would determine whether GN's accuracy
+disadvantage is an artifact of the independent generation assumption or whether
+it persists even when the graph reflects real structure.
+
+### 8.3 Sensitivity Analysis over Slip and Guess Parameters
+
+The fixed slip (s = 0.10) and guess (g = 0.20) parameters used in this evaluation
+represent one point in a two-dimensional parameter space. A systematic sensitivity
+analysis would vary both parameters independently across a grid — for example, slip
+in {0.05, 0.10, 0.20, 0.30} and guess in {0.10, 0.20, 0.30} — and re-run the full
+evaluation for each combination, reporting the IB–GN accuracy gap as a function of
+slip and guess. This analysis would quantify how robust the IB advantage is to
+noise level and would identify the parameter regime, if any, under which GN performs
+comparably or better. The stability findings (Section 6.4) would also be worth
+re-examining under higher noise, since instability under GN for weak students may
+be amplified or attenuated by response noise level.
+
+---
+
+## 9. AILA Extension
+
+### 9.1 Replacing Simulated Students with Real Users
+
+The simulation in this report generates students by sampling binary mastery vectors
+from a probability distribution. Real AILA users are not generated — they arrive
+with prior interaction histories, partially formed knowledge states, and response
+patterns that do not fit neatly into any parameterized profile type. Replacing
+simulated students with real users requires three changes to the evaluation
+infrastructure.
+
+First, the BKT mastery state must be initialized from prior session data rather
+than set to 0.5 across all concepts. AILA logs user interactions; a warm-start
+initializer would read the most recent session's final mastery estimates and use
+them as the starting state for the next session. Second, the concept set must
+expand from six abstract nodes to the full set of concepts represented in AILA's
+knowledge graph, which includes topic-level and subtopic-level nodes with
+heterogeneous connectivity. Third, true mastery labels — needed to compute
+diagnostic accuracy — are not available for real users. Evaluation would shift
+from accuracy to proxy metrics such as question response correctness rate or
+post-session assessment score, requiring a separate ground-truth collection
+mechanism such as a brief end-of-session quiz.
+
+### 9.2 Integrating with AILA's Question Bank and Knowledge Graph
+
+AILA's question bank is organized differently from the 24-question bank used in
+this simulation. Questions are matched to concepts through NLP-based tagging —
+each question is associated with one or more concept nodes based on keyword and
+embedding similarity between the question text and the concept label. Integrating
+the BKT-based selection policies requires a concept-to-question index: a mapping
+from each concept node to the set of questions tagged to that concept, used to
+retrieve candidate questions once the policy selects a target concept.
+
+The knowledge graph integration is more direct. AILA already maintains a graph
+of concept dependencies; the Graph Neighbor policy can read its adjacency list
+directly to determine neighbor concepts for selection. The Information-Based policy
+does not use the graph and requires only the mastery estimate vector, making it
+easier to integrate but less tied to AILA's existing graph infrastructure. A
+practical deployment would run both policies in parallel — IB for new users in
+cold-start sessions, GN for returning users with established mastery estimates —
+and use per-user accuracy metrics collected over time to evaluate which policy
+produces better diagnostic outcomes in the real classroom setting.
+
+### 9.3 Ethical Considerations of Adaptive Testing
+
+Deploying adaptive diagnostic testing in a real classroom introduces ethical
+considerations that are absent from a simulation study. Three are worth naming
+explicitly.
+
+The first is transparency. Students should know that the questions they receive
+are selected by an algorithm based on their estimated mastery state, not randomly
+or uniformly. Opaque adaptive systems risk undermining student trust if the
+selection rationale is not explainable.
+
+The second is mastery labelling error. BKT mastery estimates are noisy. A student
+who performs poorly on a few questions in one session may be labelled as
+non-master of a concept and subsequently receive remedial questions in future
+sessions, even if the low performance was due to a bad day or misread question
+rather than genuine lack of mastery. Persistent mislabelling creates a feedback
+loop: the system continues probing a concept the student has actually mastered,
+reducing the diversity of questions they receive. Error-correction mechanisms —
+such as a mastery confidence threshold below which the system refrains from hard
+classification — would mitigate this risk.
+
+The third is equity. If different student profiles systematically receive different
+question sequences, and if question diversity affects learning outcomes as well as
+diagnostic accuracy, then the adaptive policy is not merely measuring knowledge
+differences — it is potentially widening them. An audit of question diversity by
+demographic group, if AILA collects such data, would be a minimum prerequisite
+before deploying adaptive selection at scale.
+
+---
