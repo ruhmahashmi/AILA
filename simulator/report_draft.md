@@ -216,7 +216,6 @@ Initialize step_count = 0
 Initialize log = []
 
 WHILE step_count < MAX_QUESTIONS:
-
 q ← SELECT_QUESTION(policy, graph, question_bank, m, last_concept)
 r ← SIMULATE_RESPONSE(student.true_mastery, q)
 m ← UPDATE_ESTIMATE(m, q.concept_id, r, α)
@@ -378,7 +377,7 @@ others show no meaningful difference, pointing toward student-level variation in
 how effectively each policy exploits the local graph structure versus global
 uncertainty.
 
-![Figure 2...](chart2_per_student_diff.png)
+![Figure 2: Per-student accuracy difference (GN − IB) by student ID and profile](chart2_accuracy_diff_scatter.png)
 
 ### 6.3 Per-Concept Question Coverage
 
