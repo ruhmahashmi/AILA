@@ -17,3 +17,9 @@ chart2_accuracy_diff_scatter.png
 chart3_concept_coverage.png
 chart4_stability.png
 evaluation_summary.csv
+*.png
+evaluation_metrics.csv
+evaluation_summary.csv
+comparison_results.csv
+concept_coverage.csv
+simulation_results_*.csv
