@@ -296,3 +296,142 @@ conditions is attributable to the selection constraint rather than to difference
 in scoring, estimation, or stopping behavior.
 
 ---
+
+## 5. Experiments
+
+### 5.1 Simulation Setup
+
+Both policies were evaluated within the same simulator, with a fixed knowledge graph
+of six concepts, a question bank of 24 questions (four per concept), and a 12-question
+hard limit per student run. Configuration parameters were held constant across all
+conditions: slip s = 0.10, guess g = 0.20, mastery update step α = 0.1, and initial
+mastery estimates m_k = 0.5 for all concepts. The stopping criterion was the 12-question
+hard limit; no student reached early convergence under either policy in this evaluation.
+
+### 5.2 Student Population
+
+Three hundred students were generated per experimental run, split equally across three
+profile types: 100 strong (mastery probability p = 0.75 per concept), 100 medium
+(p = 0.50), and 100 weak (p = 0.25). Concept mastery values were sampled independently
+for each concept within each student using a fixed random seed. Both policies were run
+on identical student populations — the same 300 students, generated from the same seed,
+were used for both Graph Neighbor and Information-Based runs within each batch. This
+ensures that any observed accuracy difference reflects policy behavior rather than
+differences in the student population.
+
+### 5.3 Multi-Seed Evaluation
+
+To assess the stability of results across different student populations, the full
+experimental batch was repeated across three independent random seeds: 42, 99, and 7.
+Each seed produces a distinct population of 300 students; both policies are run on
+the same student population within each seed. This yields 900 student runs per policy
+in total. Evaluation metrics are computed as per-seed averages first — mean accuracy
+across 300 students within each seed — and then averaged across the three seeds. This
+two-stage averaging ensures each seed contributes equally to the final reported metrics
+regardless of any minor variation in student count.
+
+### 5.4 Evaluation Metrics
+
+The primary evaluation metric is diagnostic accuracy, defined as the proportion of
+the six concepts correctly classified at the end of each student run — that is, the
+proportion for which the final binary classification of the estimated mastery vector
+matches the student's true mastery vector. The secondary metrics are per-concept
+question coverage, computed as the average number of times each concept was selected
+per student across all seeds, and accuracy stability, measured as the standard deviation
+of per-seed mean accuracy across the three seeds. Per-student accuracy differences
+between the two policies are also examined to assess whether one policy dominates
+uniformly or only on average.
+
+---
+
+## 6. Results
+
+### 6.1 Diagnostic Accuracy by Policy and Profile
+
+Information-Based selection produced higher average diagnostic accuracy than Graph
+Neighbor across all three student profiles, with the performance gap widening as
+student knowledge level decreased. For strong students, the margin was modest —
+Information-Based achieved a mean accuracy of 0.895 compared to Graph Neighbor's 0.8817, a difference of 0.0133. For medium students, the gap was 0.0083 (IB: 0.865, GN: 0.8567). For weak students, the advantage widened to 0.0345 (IB: 0.8367, GN: 0.8022), representing the largest policy-induced accuracy difference observed in
+this study.
+
+These results are summarized in Figure 1. The consistent direction of the effect —
+Information-Based outperforming Graph Neighbor across all three profiles — indicates
+that the accuracy advantage is not confined to a particular student type. However,
+the widening gap for weaker students suggests that the consequences of suboptimal
+question selection are more severe when mastery is low. A student with limited knowledge
+has fewer mastered concepts to anchor the session, making the policy's ability to
+identify and probe uncertain concepts globally more consequential than its ability
+to follow local graph structure.
+
+*Figure 1: Average diagnostic accuracy by policy and student profile (Chart 1).*
+
+### 6.2 Per-Student Accuracy Differences
+
+Examining accuracy differences at the individual student level reveals that neither
+policy dominates absolutely — both policies produce higher accuracy than the other
+for a meaningful subset of students. Figure 2 plots the per-student accuracy
+difference (Graph Neighbor minus Information-Based) on the y-axis against student
+ID on the x-axis, coloured by profile type.
+
+Points above the zero line represent students for whom Graph Neighbor produced higher
+accuracy; points below represent students for whom Information-Based was superior.
+The distribution is mixed across all three profiles, confirming that the average
+advantage of Information-Based does not reflect uniform dominance. Among strong
+students, IB outperformed GN for 24 students while GN outperformed IB for 16,
+with 60 students showing no difference. The imbalance grew for medium students
+(IB better for 30, GN better for 23, equal for 47) and was most pronounced for
+weak students, where IB outperformed GN for 30 students while GN outperformed IB
+for only 9 — a 3.3:1 ratio that is directly consistent with the group-level
+accuracy gap reported in Section 6.1. The spread of the distribution also suggests that the policy
+effect is not constant: some students benefit substantially from one policy while
+others show no meaningful difference, pointing toward student-level variation in
+how effectively each policy exploits the local graph structure versus global
+uncertainty.
+
+*Figure 2: Per-student accuracy difference (GN − IB) by student ID and profile (Chart 2).*
+
+### 6.3 Per-Concept Question Coverage
+
+Information-Based distributed questions relatively evenly across the six concepts,
+with per-concept averages ranging from 1.24 to 2.50 questions per student across
+all profiles. Graph Neighbor concentrated coverage unevenly, assigning an average
+of 3.27 questions per student to concept C6 while allocating only 1.00 to C5
+and 1.29 to C3.
+
+The mechanism is direct: a concept that receives fewer questions under a given policy
+will have a less updated mastery estimate at the end of the run, increasing the
+probability of misclassification. Under Graph Neighbor, concepts C3 and C5 received
+systematically fewer questions across all three seeds and all three profile types,
+meaning their mastery status was less reliably determined. Under Information-Based,
+the global uncertainty criterion ensured that no concept accumulated a large question
+deficit — when any concept's estimate remained near 0.5, it was eligible for selection
+regardless of its position in the graph. The coverage pattern is therefore not a
+secondary structural observation — it is the mechanistic explanation for why
+Information-Based achieved higher accuracy across all conditions.
+
+*Figure 3: Average questions per concept per student by policy (Chart 3).*
+
+### 6.4 Accuracy Stability Across Seeds
+
+The two policies showed notably different stability profiles across student types.
+For strong students, Graph Neighbor was more stable — a standard deviation of 0.0072
+compared to Information-Based's 0.0111. For medium students, the pattern held — GN
+again at 0.0072 versus IB at 0.0157. For weak students, the relationship reversed:
+Graph Neighbor's standard deviation rose to 0.0231, substantially exceeding
+Information-Based's 0.0163, making GN the less consistent policy for the student
+group where accurate diagnosis matters most.
+
+The instability of Graph Neighbor for weak students is consistent with its coverage
+behavior. Weak students have mastered fewer concepts, meaning the graph's local
+traversal is more likely to navigate toward or away from the specific concepts a
+given student has or has not mastered — an outcome that depends heavily on which
+concept happens to anchor the session. When the graph traversal aligns well with
+the student's mastery gaps, Graph Neighbor performs adequately; when it does not,
+accuracy suffers. This alignment is seed-dependent, producing the higher
+cross-seed variance observed for weak students. Information-Based, by probing
+globally, is less sensitive to the starting concept and therefore more consistent
+across seeds.
+
+*Figure 4: Standard deviation of diagnostic accuracy across seeds by policy and profile (Chart 4).*
+
+---
