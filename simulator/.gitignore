@@ -13,7 +13,6 @@ multiseed_interactions_graphneighbor.csv
 multiseed_interactions_informationbased.csv
 concept_coverage.csv
 evaluation_summary.csv
-*.png
 evaluation_metrics.csv
 evaluation_summary.csv
 comparison_results.csv
