@@ -213,7 +213,7 @@ ADAPTIVE_LOOP(student, policy, graph, question_bank, config):
 
 Initialize m_k = 0.5 for all k ∈ {1, ..., 6}
 Initialize step_count = 0
-Initialize log = ]
+Initialize log = []
 
 WHILE step_count < MAX_QUESTIONS:
 
@@ -351,27 +351,17 @@ uniformly or only on average.
 Information-Based selection produced higher average diagnostic accuracy than Graph
 Neighbor across all three student profiles, with the performance gap widening as
 student knowledge level decreased. For strong students, the margin was modest —
-Information-Based achieved a mean accuracy of 0.895 compared to Graph Neighbor's 0.8817, a difference of 0.0133. For medium students, the gap was 0.0083 (IB: 0.865, GN: 0.8567). For weak students, the advantage widened to 0.0345 (IB: 0.8367, GN: 0.8022), representing the largest policy-induced accuracy difference observed in
-this study.
+Information-Based achieved a mean accuracy of 0.895 compared to Graph Neighbor's 0.8817, a difference of 0.0133. For medium students, the gap was 0.0083 (IB: 0.865, GN: 0.8567). For weak students, the advantage widened to 0.0345 (IB: 0.8367, GN: 0.8022), representing the largest policy-induced accuracy difference observed in this study. The widening gap for weaker students suggests that the consequences of suboptimal question selection are more severe when mastery is low — a student with limited knowledge has fewer mastered concepts to anchor the session, making
+the policy's ability to identify and probe uncertain concepts globally more
+consequential than its ability to follow local graph structure (Figure 1).
 
-These results are summarized in Figure 1. The consistent direction of the effect —
-Information-Based outperforming Graph Neighbor across all three profiles — indicates
-that the accuracy advantage is not confined to a particular student type. However,
-the widening gap for weaker students suggests that the consequences of suboptimal
-question selection are more severe when mastery is low. A student with limited knowledge
-has fewer mastered concepts to anchor the session, making the policy's ability to
-identify and probe uncertain concepts globally more consequential than its ability
-to follow local graph structure.
-
-*Figure 1: Average diagnostic accuracy by policy and student profile (Chart 1).*
+![Figure 1...](chart1_accuracy_by_profile.png)
 
 ### 6.2 Per-Student Accuracy Differences
 
 Examining accuracy differences at the individual student level reveals that neither
 policy dominates absolutely — both policies produce higher accuracy than the other
-for a meaningful subset of students. Figure 2 plots the per-student accuracy
-difference (Graph Neighbor minus Information-Based) on the y-axis against student
-ID on the x-axis, coloured by profile type.
+for a meaningful subset of students. The per-student accuracy difference (Graph Neighbor minus Information-Based) is plotted against student ID, coloured by profile type, in Figure 2.
 
 Points above the zero line represent students for whom Graph Neighbor produced higher
 accuracy; points below represent students for whom Information-Based was superior.
@@ -388,7 +378,7 @@ others show no meaningful difference, pointing toward student-level variation in
 how effectively each policy exploits the local graph structure versus global
 uncertainty.
 
-*Figure 2: Per-student accuracy difference (GN − IB) by student ID and profile (Chart 2).*
+![Figure 2...](chart2_per_student_diff.png)
 
 ### 6.3 Per-Concept Question Coverage
 
@@ -409,11 +399,11 @@ regardless of its position in the graph. The coverage pattern is therefore not a
 secondary structural observation — it is the mechanistic explanation for why
 Information-Based achieved higher accuracy across all conditions.
 
-*Figure 3: Average questions per concept per student by policy (Chart 3).*
+![Figure 3...](chart3_concept_coverage.png)
 
 ### 6.4 Accuracy Stability Across Seeds
 
-The two policies showed notably different stability profiles across student types.
+Information-Based achieved lower cross-seed variance than Graph Neighbor specifically for weak students, the group where consistent diagnosis matters most — even though Graph Neighbor was more stable for strong and medium students.
 For strong students, Graph Neighbor was more stable — a standard deviation of 0.0072
 compared to Information-Based's 0.0111. For medium students, the pattern held — GN
 again at 0.0072 versus IB at 0.0157. For weak students, the relationship reversed:
@@ -432,7 +422,7 @@ cross-seed variance observed for weak students. Information-Based, by probing
 globally, is less sensitive to the starting concept and therefore more consistent
 across seeds.
 
-*Figure 4: Standard deviation of diagnostic accuracy across seeds by policy and profile (Chart 4).*
+![Figure 4...](chart4_stability.png)
 
 ---
 
@@ -453,10 +443,7 @@ matches the true binary label. In practice, student knowledge exists on a contin
 a student may have partial mastery of a concept, demonstrating it under some question
 types but not others. The binary representation used here means the evaluation
 measures classification accuracy over a simplified ground truth. The finding that
-Information-Based outperforms Graph Neighbor in binary classification accuracy is
-valid within this representation but may not generalize directly to settings where
-mastery is treated as continuous and evaluation is measured by, for example, mean
-squared error between estimated and true mastery levels.
+Information-Based outperforms Graph Neighbor in binary classification accuracy holds under this representation; whether the same advantage persists when mastery is continuous and the evaluation criterion is mean squared error rather than classification accuracy is an open question this study does not address.
 
 ### 7.2 Independent Concept Mastery Generation
 
@@ -496,8 +483,7 @@ uncertainty under BKT — for every student at the start of every session. This
 initialization is standard in BKT cold-start scenarios but may favour
 Information-Based selection. Since IB selects the concept with maximum expected
 information, and all concepts begin at equal uncertainty, IB's early selections
-are effectively arbitrary — it has no prior to exploit. As the session progresses
-and estimates diverge, IB's advantage becomes meaningful. Warm-start scenarios, in
+are effectively arbitrary — it has no prior to exploit. This means the observed IB advantage may be partially an artifact of the cold-start setting: both policies begin with identical uncertainty, which removes any advantage the graph could offer in early concept prioritization. As the session progresses and estimates diverge, IB's advantage becomes meaningful. Warm-start scenarios, in
 which prior session data is available to initialize estimates at values other than
 0.5, would change the early-session selection behavior of both policies and may
 alter the relative accuracy gap. The findings reported here apply specifically to
