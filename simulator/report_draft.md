@@ -627,3 +627,24 @@ demographic group, if AILA collects such data, would be a minimum prerequisite
 before deploying adaptive selection at scale.
 
 ---
+
+## 10. References
+
+Haertel, E. H. (1989). Using restricted latent class models to map the skill structure
+of achievement items. *Journal of Educational Measurement*, 26(4), 301–321.
+
+Junker, B. W., & Sijtsma, K. (2001). Cognitive assessment models with few assumptions,
+and connections with nonparametric item response theory.
+*Applied Psychological Measurement*, 25(3), 258–272.
+
+Rupp, A. A., Templin, J., & Henson, R. A. (2010). *Diagnostic Measurement:
+Theory, Methods, and Applications*. Guilford Press.
+
+van der Linden, W. J., & Glas, C. A. W. (Eds.). (2000).
+*Computerized Adaptive Testing: Theory and Practice*. Kluwer Academic Publishers.
+
+Wainer, H. (Ed.). (1990). *Computerized Adaptive Testing: A Primer*.
+Lawrence Erlbaum Associates.
+
+Weiss, D. J. (1982). Improving measurement quality and efficiency with adaptive
+testing. *Applied Psychological Measurement*, 6(4), 473–492.
