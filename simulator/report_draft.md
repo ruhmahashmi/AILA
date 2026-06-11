@@ -354,7 +354,7 @@ Information-Based achieved a mean accuracy of 0.895 compared to Graph Neighbor's
 the policy's ability to identify and probe uncertain concepts globally more
 consequential than its ability to follow local graph structure (Figure 1).
 
-![Figure 1...](chart1_accuracy_by_profile.png)
+![Figure 1: Average diagnostic accuracy by policy and student profile](chart1_accuracy_by_profile.png)
 
 ### 6.2 Per-Student Accuracy Differences
 
@@ -398,11 +398,10 @@ regardless of its position in the graph. The coverage pattern is therefore not a
 secondary structural observation — it is the mechanistic explanation for why
 Information-Based achieved higher accuracy across all conditions.
 
-![Figure 3...](chart3_concept_coverage.png)
+![Figure 3: Average questions per concept per student by policy](chart3_concept_coverage.png)
 
 ### 6.4 Accuracy Stability Across Seeds
 
-Information-Based achieved lower cross-seed variance than Graph Neighbor specifically for weak students, the group where consistent diagnosis matters most — even though Graph Neighbor was more stable for strong and medium students.
 For strong students, Graph Neighbor was more stable — a standard deviation of 0.0072
 compared to Information-Based's 0.0111. For medium students, the pattern held — GN
 again at 0.0072 versus IB at 0.0157. For weak students, the relationship reversed:
@@ -463,7 +462,7 @@ a real classroom.
 
 ### 7.3 Fixed Slip and Guess Parameters
 
-The BKT response model uses fixed slip (s = 0.10) and guess (g = 0.20) parameters
+The DINA-style response model uses fixed slip (s = 0.10) and guess (g = 0.20) parameters
 across all concepts and all students. These values are plausible for a low-noise
 setting but were not validated against real response data. The relative accuracy
 advantage of Information-Based over Graph Neighbor depends on how noisily student
