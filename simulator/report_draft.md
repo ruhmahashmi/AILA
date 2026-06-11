@@ -477,8 +477,8 @@ precise effect sizes without further sensitivity analysis.
 ### 7.4 Cold-Start Mastery Initialization
 
 All concept mastery estimates are initialized at 0.5 — the point of maximum
-uncertainty under BKT — for every student at the start of every session. This
-initialization is standard in BKT cold-start scenarios but may favour
+uncertainty — for every student at the start of every session. This
+initialization is standard in cold-start scenarios but may favour
 Information-Based selection. Since IB selects the concept with maximum expected
 information, and all concepts begin at equal uncertainty, IB's early selections
 are effectively arbitrary — it has no prior to exploit. This means the observed IB advantage may be partially an artifact of the cold-start setting: both policies begin with identical uncertainty, which removes any advantage the graph could offer in early concept prioritization. As the session progresses and estimates diverge, IB's advantage becomes meaningful. Warm-start scenarios, in
@@ -490,7 +490,7 @@ cold-start evaluation; warm-start performance is an open question.
 ### 7.5 Simulation versus Language-Based Question Selection
 
 The question selection criterion used in this evaluation is information-theoretic:
-both policies select questions by reasoning over BKT mastery estimates and graph
+both policies select questions by reasoning over mastery estimates and graph
 structure. AILA's actual question selection uses natural language processing to
 match student queries to question bank items based on embedding similarity or
 keyword overlap. This is a different selection mechanism. The information-based
@@ -504,10 +504,10 @@ integration question directly.
 
 ## 8. Future Work
 
-### 8.1 Continuous Mastery and Extended BKT
+### 8.1 Continuous Mastery and Extended Mastery Models
 
 The binary mastery representation used in this evaluation is the most tractable
-formulation of BKT but not the most realistic. A direct extension would replace
+formulation of the mastery estimator but not the most realistic. A direct extension would replace
 each concept's binary true mastery label with a continuous mastery probability,
 sampled from a Beta distribution with parameters tuned to each profile type. Mastery
 update rules would remain the same, but the evaluation metric would shift from
@@ -517,7 +517,7 @@ advantage of Information-Based translates into lower estimation error under
 continuous mastery — a stronger claim than classification accuracy.
 
 A further extension within this direction is to implement the Deep Knowledge Tracing
-(DKT) formulation, in which mastery is estimated by an LSTM rather than the BKT
+(DKT) formulation, in which mastery is estimated by an LSTM rather than the fixed-step
 update rule. DKT has been shown to outperform BKT on real student response
 datasets; comparing IB and GN policies on top of a DKT mastery model would
 test whether the policy advantage is model-dependent or robust across mastery
@@ -566,7 +566,7 @@ patterns that do not fit neatly into any parameterized profile type. Replacing
 simulated students with real users requires three changes to the evaluation
 infrastructure.
 
-First, the BKT mastery state must be initialized from prior session data rather
+First, the mastery state must be initialized from prior session data rather
 than set to 0.5 across all concepts. AILA logs user interactions; a warm-start
 initializer would read the most recent session's final mastery estimates and use
 them as the starting state for the next session. Second, the concept set must
@@ -584,7 +584,7 @@ AILA's question bank is organized differently from the 24-question bank used in
 this simulation. Questions are matched to concepts through NLP-based tagging —
 each question is associated with one or more concept nodes based on keyword and
 embedding similarity between the question text and the concept label. Integrating
-the BKT-based selection policies requires a concept-to-question index: a mapping
+the adaptive selection policies requires a concept-to-question index: a mapping
 from each concept node to the set of questions tagged to that concept, used to
 retrieve candidate questions once the policy selects a target concept.
 
@@ -609,7 +609,7 @@ are selected by an algorithm based on their estimated mastery state, not randoml
 or uniformly. Opaque adaptive systems risk undermining student trust if the
 selection rationale is not explainable.
 
-The second is mastery labelling error. BKT mastery estimates are noisy. A student
+The second is mastery labelling error. Mastery estimates under the fixed-step update rule are noisy. A student
 who performs poorly on a few questions in one session may be labelled as
 non-master of a concept and subsequently receive remedial questions in future
 sessions, even if the low performance was due to a bad day or misread question
